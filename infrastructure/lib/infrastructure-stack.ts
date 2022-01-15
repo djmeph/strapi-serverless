@@ -1,10 +1,13 @@
-import { CfnOutput, Fn, Stack, StackProps } from 'aws-cdk-lib';
+import { CfnOutput, Duration, Fn, Stack, StackProps } from 'aws-cdk-lib';
 import { InstanceType, IVpc, NatProvider, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
+import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
 import {
   AuroraMysqlEngineVersion,
   DatabaseClusterEngine,
   ServerlessCluster
 } from 'aws-cdk-lib/aws-rds';
+import { Bucket, IBucket } from 'aws-cdk-lib/aws-s3';
+import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
 const cidrBlocks = {
@@ -19,12 +22,20 @@ const cidrBlocks = {
 
 export class StrapiServerlessStack extends Stack {
   vpc: IVpc;
-  cluster: ServerlessCluster
+  cluster: ServerlessCluster;
+  creds: ISecret;
+  jwtSecret: ISecret;
+  adminAssetsBucket: IBucket;
+  webAssetsBucket: IBucket;
+  lambdaApi: Function;
 
   constructor(scope: Construct, id: string, props?: StackProps) {
     super(scope, id, props);
     this.createVPC();
+    this.createSecrets();
+    this.createBuckets();
     this.createRDSCluster();
+    this.createLambdaAPI();
     this.createOutputs();
   }
 
@@ -56,6 +67,18 @@ export class StrapiServerlessStack extends Stack {
     });
   }
 
+  createSecrets() {
+    this.jwtSecret = new Secret(this, 'JwtSecret', {
+      secretName: 'strapi-jwt-secret',
+      description: 'Strapi JWT Secret'
+    });
+  }
+
+  createBuckets() {
+    this.adminAssetsBucket = new Bucket(this, 'AdminAssetsBucket');
+    this.webAssetsBucket = new Bucket(this, 'WebAssetsBucket');
+  }
+
   createRDSCluster() {
     this.cluster = new ServerlessCluster(this, 'RdsCluster', {
       engine: DatabaseClusterEngine.auroraMysql({
@@ -68,18 +91,48 @@ export class StrapiServerlessStack extends Stack {
         subnetType: SubnetType.PRIVATE_ISOLATED
       },
     });
+    if (this.cluster.secret) {
+      this.creds = this.cluster.secret;
+    }
+  }
+
+  createLambdaAPI() {
+    this.lambdaApi = new Function(this, 'LambdaApi', {
+      code: Code.fromAsset(`${__dirname}/../../backend/build`),
+      handler: 'index.handler',
+      timeout: Duration.seconds(30),
+      runtime: Runtime.NODEJS_14_X,
+      memorySize: 1024,
+      vpc: this.vpc,
+      vpcSubnets: {
+        subnetType: SubnetType.PRIVATE_WITH_NAT
+      },
+      environment: {
+        NODE_ENV: 'production',
+        JWT_SECRET_ARN: this.jwtSecret.secretArn,
+        CREDS_SECRET_ARN: this.creds.secretArn,
+        ASSETS_BUCKET: this.webAssetsBucket.bucketName
+      }
+    });
   }
 
   createOutputs() {
-    if (this.cluster.secret) {
-      new CfnOutput(this, 'RdsCredentialsSecretArn', {
-        value: this.cluster.secret.secretArn,
-        exportName: Fn.join(':', [
-          Fn.ref('AWS::StackName'),
-          'rds-credentials-secret-arn',
-        ]),
-        description: 'RDS Credentials Secret ARN',
-      });
-    }
+    new CfnOutput(this, 'RdsCredentialsSecretArn', {
+      value: this.creds.secretArn,
+      exportName: Fn.join(':', [
+        Fn.ref('AWS::StackName'),
+        'rds-credentials-secret-arn',
+      ]),
+      description: 'RDS Credentials Secret ARN',
+    });
+
+    new CfnOutput(this, 'JwtSecretArn', {
+      value: this.jwtSecret.secretArn,
+      exportName: Fn.join(':', [
+        Fn.ref('AWS::StackName'),
+        'jwt-secret-arn',
+      ]),
+      description: 'JWT Secret ARN',
+    })
   }
 }
