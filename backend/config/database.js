@@ -2,9 +2,13 @@ const path = require('path');
 
 module.exports = ({ env }) => ({
   connection: {
-    client: 'sqlite',
+    client: 'mysql',
     connection: {
-      filename: path.join(__dirname, '..', env('DATABASE_FILENAME', '.tmp/data.db')),
+      host: 'database',
+      port: 3306,
+      database: 'strapi',
+      user: 'dev',
+      password: 'dev'
     },
     useNullAsDefault: true,
   },
