@@ -1,15 +1,17 @@
 const path = require('path');
 
+const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
+
 module.exports = ({ env }) => ({
   connection: {
     client: 'mysql',
     connection: {
-      host: 'database',
-      port: 3306,
-      database: 'strapi',
-      user: 'dev',
-      password: 'dev'
+      host: env('DB_HOST', 'database'),
+      port: env.int('DB_PORT', 3306),
+      database: env('DB_DATABASE', 'strapi'),
+      user: env('DB_USER', 'dev'),
+      password: env('DB_PASSWORD', 'dev'),
     },
-    useNullAsDefault: true,
+    debug: false
   },
 });

@@ -10,6 +10,7 @@ services:
       - /src/infrastructure/node_modules
       - ~/.ssh:/root/.ssh:ro
       - ~/.aws:/root/.aws:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - 1337:1337
   database:

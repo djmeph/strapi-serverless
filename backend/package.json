@@ -7,10 +7,12 @@
     "develop": "strapi develop",
     "start": "strapi start",
     "build": "strapi build",
+    "prepare-docker": "mkdir -p docker; cp -R config database public src package.json yarn.lock favicon.ico server.js Dockerfile docker/",
     "strapi": "strapi"
   },
   "devDependencies": {},
   "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.47.0",
     "@strapi/plugin-i18n": "4.0.4",
     "@strapi/plugin-users-permissions": "4.0.4",
     "@strapi/strapi": "4.0.4",
