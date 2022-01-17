@@ -1,6 +1,9 @@
-import { CfnOutput, Duration, Fn, Stack, StackProps } from 'aws-cdk-lib';
-import { InstanceType, IVpc, NatProvider, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
-import { Code, Function, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { CfnOutput, Fn, Stack } from 'aws-cdk-lib';
+import { InstanceType, IVpc, NatProvider, Peer, Port, SecurityGroup, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
+import { DockerImageAsset } from 'aws-cdk-lib/aws-ecr-assets';
+import { ContainerImage, LogDrivers } from 'aws-cdk-lib/aws-ecs';
+import { ApplicationLoadBalancedFargateService } from 'aws-cdk-lib/aws-ecs-patterns';
+import { LogGroup } from 'aws-cdk-lib/aws-logs';
 import {
   AuroraMysqlEngineVersion,
   DatabaseClusterEngine,
@@ -9,6 +12,11 @@ import {
 import { Bucket, IBucket } from 'aws-cdk-lib/aws-s3';
 import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
+import * as path from 'path';
+import { ApplicationProtocol, SslPolicy } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import { InfrastructureStackProps } from './infrastructure-interface';
+import { Certificate, ICertificate } from 'aws-cdk-lib/aws-certificatemanager';
+import { HostedZone, IHostedZone } from 'aws-cdk-lib/aws-route53';
 
 const cidrBlocks = {
   vpcCidr: '10.1.0.0/16',
@@ -22,20 +30,27 @@ const cidrBlocks = {
 
 export class StrapiServerlessStack extends Stack {
   vpc: IVpc;
-  cluster: ServerlessCluster;
+  rdsCluster: ServerlessCluster;
+  certificate: ICertificate;
+  domainZone: IHostedZone;
+  fargateService: ApplicationLoadBalancedFargateService;
+  apiLogGroup: LogGroup;
   creds: ISecret;
   jwtSecret: ISecret;
+  saltSecret: ISecret;
   adminAssetsBucket: IBucket;
   webAssetsBucket: IBucket;
-  lambdaApi: Function;
 
-  constructor(scope: Construct, id: string, props?: StackProps) {
+  constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
     super(scope, id, props);
     this.createVPC();
     this.createSecrets();
     this.createBuckets();
     this.createRDSCluster();
-    this.createLambdaAPI();
+    this.createLogGroup();
+    this.createCertificate();
+    this.createHostedZone();
+    this.createFargateService();
     this.createOutputs();
   }
 
@@ -72,6 +87,11 @@ export class StrapiServerlessStack extends Stack {
       secretName: 'strapi-jwt-secret',
       description: 'Strapi JWT Secret'
     });
+
+    this.saltSecret = new Secret(this, 'SaltSecret', {
+      secretName: 'strapi-salt-secret',
+      description: 'Strapi Salt Secret'
+    });
   }
 
   createBuckets() {
@@ -80,7 +100,19 @@ export class StrapiServerlessStack extends Stack {
   }
 
   createRDSCluster() {
-    this.cluster = new ServerlessCluster(this, 'RdsCluster', {
+    const rdsSecurityGroup = new SecurityGroup(this, 'RDSSecurityGroup', {
+      vpc: this.vpc,
+      description: 'Ingress access to RDS'
+    });
+
+    for (const cidr of Object.values(cidrBlocks)) {
+      rdsSecurityGroup.addIngressRule(
+        Peer.ipv4(cidr),
+        Port.allTcp()
+      )
+    }
+
+    this.rdsCluster = new ServerlessCluster(this, 'RdsCluster', {
       engine: DatabaseClusterEngine.auroraMysql({
         version: AuroraMysqlEngineVersion.VER_5_7_12
       }),
@@ -90,30 +122,76 @@ export class StrapiServerlessStack extends Stack {
       vpcSubnets: {
         subnetType: SubnetType.PRIVATE_ISOLATED
       },
+      securityGroups: [rdsSecurityGroup]
     });
-    if (this.cluster.secret) {
-      this.creds = this.cluster.secret;
+
+    if (this.rdsCluster.secret) {
+      this.creds = this.rdsCluster.secret;
     }
   }
 
-  createLambdaAPI() {
-    this.lambdaApi = new Function(this, 'LambdaApi', {
-      code: Code.fromAsset(`${__dirname}/../../backend/build`),
-      handler: 'index.handler',
-      timeout: Duration.seconds(30),
-      runtime: Runtime.NODEJS_14_X,
-      memorySize: 1024,
-      vpc: this.vpc,
-      vpcSubnets: {
-        subnetType: SubnetType.PRIVATE_WITH_NAT
-      },
-      environment: {
-        NODE_ENV: 'production',
-        JWT_SECRET_ARN: this.jwtSecret.secretArn,
-        CREDS_SECRET_ARN: this.creds.secretArn,
-        ASSETS_BUCKET: this.webAssetsBucket.bucketName
-      }
+  createLogGroup() {
+    this.apiLogGroup = new LogGroup(this, 'ApiLogGroup', {
+      logGroupName: 'strapi-serverless'
     });
+  }
+
+  createCertificate() {
+    this.certificate = Certificate.fromCertificateArn(
+      this,
+      'SSLCertificate',
+      this.props.certificateArn
+    );
+  }
+
+  createHostedZone() {
+    this.domainZone = HostedZone.fromLookup(this, 'HostedZone', {
+      domainName: this.props.domainName
+    });
+  }
+
+  createFargateService() {
+    const imageAsset = new DockerImageAsset(this, 'DockerImageAsset', {
+      directory: path.join(__dirname, '../..', 'backend/docker'),
+    });
+
+    this.fargateService = new ApplicationLoadBalancedFargateService(this, 'LoadBalancedFargateService', {
+      desiredCount: 1,
+      cpu: 512,
+      memoryLimitMiB: 4096,
+      taskImageOptions: {
+        image: ContainerImage.fromDockerImageAsset(imageAsset),
+        environment: {
+          NODE_ENV: 'production',
+          JWT_SECRET_ARN: this.jwtSecret.secretArn,
+          SALT_SECRET_ARN: this.saltSecret.secretArn,
+          CREDS_SECRET_ARN: this.creds.secretArn,
+          ASSETS_BUCKET: this.webAssetsBucket.bucketName,
+          PORT: '80',
+          STRAPI_URL: `https://${this.props.elbSubdomain}.${this.props.domainName}`,
+          PUBLIC_ADMIN_URL: `https://${this.props.elbSubdomain}.${this.props.domainName}/admin`,
+          SERVE_ADMIN: 'false'
+        },
+        logDriver: LogDrivers.awsLogs({
+          streamPrefix: 'strapi-serverless',
+          logGroup: this.apiLogGroup,
+        }),
+        enableLogging: true
+      },
+      publicLoadBalancer: true,
+      vpc: this.vpc,
+      sslPolicy: SslPolicy.RECOMMENDED,
+      redirectHTTP: true,
+      protocol: ApplicationProtocol.HTTPS,
+      certificate: this.certificate,
+      domainName: `${this.props.elbSubdomain}.${this.props.domainName}`,
+      domainZone: this.domainZone,
+    });
+
+    this.creds.grantRead(this.fargateService.taskDefinition.taskRole);
+    this.jwtSecret.grantRead(this.fargateService.taskDefinition.taskRole);
+    this.saltSecret.grantRead(this.fargateService.taskDefinition.taskRole);
+    this.webAssetsBucket.grantRead(this.fargateService.taskDefinition.taskRole);
   }
 
   createOutputs() {
@@ -133,6 +211,15 @@ export class StrapiServerlessStack extends Stack {
         'jwt-secret-arn',
       ]),
       description: 'JWT Secret ARN',
-    })
+    });
+
+    new CfnOutput(this, 'ApiUrl', {
+      value: this.fargateService.loadBalancer.loadBalancerDnsName,
+      exportName: Fn.join(':', [
+        Fn.ref('AWS::StackName'),
+        'api-url',
+      ]),
+      description: 'API URL',
+    });
   }
 }
