@@ -13,9 +13,9 @@
   "devDependencies": {},
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.47.0",
-    "@strapi/plugin-i18n": "4.0.4",
-    "@strapi/plugin-users-permissions": "4.0.4",
-    "@strapi/strapi": "4.0.4",
+    "@strapi/plugin-i18n": "4.0.5",
+    "@strapi/plugin-users-permissions": "4.0.5",
+    "@strapi/strapi": "4.0.5",
     "mysql": "^2.18.1"
   },
   "author": {

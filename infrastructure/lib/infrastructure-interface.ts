@@ -7,8 +7,10 @@ import { Environment, StackProps } from 'aws-cdk-lib/core'
 export interface InfrastructureStackProps extends StackProps {
   env: Environment;
   domainName: string;
-  elbSubdomain: string;
+  subdomain: string;
   certificateArn: string;
+  logGroupName: string;
+  elbSubdomain: string;
 }
 
 /*
@@ -22,8 +24,10 @@ export const config: InfrastructureStackProps = {
     account: '000000000000',
   },
   domainName: 'example.com',
-  elbSubdomain: 'strapi',
-  certificateArn: 'arn:aws:acm:us-east-1:000000000000:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+  subdomain: 'strapi',
+  certificateArn: 'arn:aws:acm:us-east-1:000000000000:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx',
+  logGroupName: 'strapi-serverless'
+  elbSubdomain: 'strapi-api';
 };
 
 */
