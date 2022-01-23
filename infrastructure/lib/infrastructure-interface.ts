@@ -11,6 +11,7 @@ export interface InfrastructureStackProps extends StackProps {
   certificateArn: string;
   logGroupName: string;
   elbSubdomain: string;
+  assetsPrefix: string;
 }
 
 /*

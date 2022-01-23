@@ -42,9 +42,8 @@ export class StrapiServerlessStack extends Stack {
   jwtSecret: ISecret;
   saltSecret: ISecret;
   webAssetBucket: IBucket;
-  strapiAssetBucket: IBucket;
   oai: OriginAccessIdentity;
-  dist: Distribution;
+  strapiAssetDist: Distribution;
 
   constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
     super(scope, id, props);
@@ -56,7 +55,7 @@ export class StrapiServerlessStack extends Stack {
     this.createCertificate();
     this.createHostedZone();
     this.createFargateService();
-    // this.createCloudfrontDistribution();
+    this.createCloudfrontDistribution();
     // this.deployWebAssets();
   }
 
@@ -102,10 +101,8 @@ export class StrapiServerlessStack extends Stack {
 
   createBuckets() {
     this.webAssetBucket = new Bucket(this, 'WebAssetBucket');
-    this.strapiAssetBucket = new Bucket(this, 'StrapiAssetBucket');
     this.oai = new OriginAccessIdentity(this, 'CloudfrontOriginAccessIdentity');
     this.webAssetBucket.grantRead(this.oai);
-    this.strapiAssetBucket.grantRead(this.oai);
   }
 
   createRDSCluster() {
@@ -178,16 +175,20 @@ export class StrapiServerlessStack extends Stack {
           JWT_SECRET_ARN: this.jwtSecret.secretArn,
           SALT_SECRET_ARN: this.saltSecret.secretArn,
           CREDS_SECRET_ARN: this.creds.secretArn,
-          ASSETS_BUCKET: this.strapiAssetBucket.bucketName,
+          ASSETS_BUCKET: this.webAssetBucket.bucketName,
           PORT: '80',
           STRAPI_URL: `https://${this.props.elbSubdomain}.${this.props.domainName}`,
-          PUBLIC_ADMIN_URL: `https://${this.props.elbSubdomain}.${this.props.domainName}/admin`
+          PUBLIC_ADMIN_URL: `https://${this.props.elbSubdomain}.${this.props.domainName}/admin`,
+          AWS_REGION: this.props.env.region || '',
+          CDN_BASE_URL: `https://${this.props.assetsPrefix}.${this.props.domainName}`,
+          BUCKET_PREFIX: this.props.assetsPrefix,
+          AWS_S3_ENABLED: 'true'
         },
         logDriver: LogDrivers.awsLogs({
           streamPrefix: this.props.subdomain,
           logGroup: this.apiLogGroup,
         }),
-        enableLogging: true
+        enableLogging: true,
       },
       publicLoadBalancer: true,
       vpc: this.vpc,
@@ -196,22 +197,22 @@ export class StrapiServerlessStack extends Stack {
       protocol: ApplicationProtocol.HTTPS,
       certificate: this.certificate,
       domainName: `${this.props.elbSubdomain}.${this.props.domainName}`,
-      domainZone: this.domainZone,
+      domainZone: this.domainZone
     });
 
     this.creds.grantRead(this.fargateService.taskDefinition.taskRole);
     this.jwtSecret.grantRead(this.fargateService.taskDefinition.taskRole);
     this.saltSecret.grantRead(this.fargateService.taskDefinition.taskRole);
-    this.strapiAssetBucket.grantReadWrite(this.fargateService.taskDefinition.taskRole);
+    this.webAssetBucket.grantReadWrite(this.fargateService.taskDefinition.taskRole);
   }
 
   createCloudfrontDistribution() {
     const webAssetsOrigin = new S3Origin(this.webAssetBucket, {
       originAccessIdentity: this.oai,
-      originPath: '/'
+      originPath: `/${this.props.assetsPrefix}`
     });
 
-    this.dist = new Distribution(this, 'WebDistribution', {
+    this.strapiAssetDist = new Distribution(this, 'WebDistribution', {
       defaultBehavior: {
         origin: webAssetsOrigin,
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -220,14 +221,14 @@ export class StrapiServerlessStack extends Stack {
         cachePolicy: CachePolicy.CACHING_OPTIMIZED,
       },
       certificate: this.certificate,
-      domainNames: [`${this.props.subdomain}.${this.props.domainName}`],
+      domainNames: [`${this.props.assetsPrefix}.${this.props.domainName}`],
       geoRestriction: GeoRestriction.allowlist('US'),
     });
 
     new CnameRecord(this, 'CloudfrontCnameRecord', {
-      domainName: this.dist.distributionDomainName,
+      domainName: this.strapiAssetDist.distributionDomainName,
       zone: this.domainZone,
-      recordName: this.props.subdomain,
+      recordName: this.props.assetsPrefix,
     });
   }
 
