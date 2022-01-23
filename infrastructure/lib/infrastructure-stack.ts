@@ -42,6 +42,7 @@ export class StrapiServerlessStack extends Stack {
   jwtSecret: ISecret;
   saltSecret: ISecret;
   webAssetBucket: IBucket;
+  strapiAssetBucket: IBucket;
   oai: OriginAccessIdentity;
   dist: Distribution;
 
@@ -54,9 +55,9 @@ export class StrapiServerlessStack extends Stack {
     this.createLogGroup();
     this.createCertificate();
     this.createHostedZone();
-    // this.createFargateService();
+    this.createFargateService();
     // this.createCloudfrontDistribution();
-    this.deployWebAssets();
+    // this.deployWebAssets();
   }
 
   createVPC() {
@@ -101,8 +102,10 @@ export class StrapiServerlessStack extends Stack {
 
   createBuckets() {
     this.webAssetBucket = new Bucket(this, 'WebAssetBucket');
+    this.strapiAssetBucket = new Bucket(this, 'StrapiAssetBucket');
     this.oai = new OriginAccessIdentity(this, 'CloudfrontOriginAccessIdentity');
     this.webAssetBucket.grantRead(this.oai);
+    this.strapiAssetBucket.grantRead(this.oai);
   }
 
   createRDSCluster() {
@@ -175,7 +178,7 @@ export class StrapiServerlessStack extends Stack {
           JWT_SECRET_ARN: this.jwtSecret.secretArn,
           SALT_SECRET_ARN: this.saltSecret.secretArn,
           CREDS_SECRET_ARN: this.creds.secretArn,
-          ASSETS_BUCKET: this.webAssetBucket.bucketName,
+          ASSETS_BUCKET: this.strapiAssetBucket.bucketName,
           PORT: '80',
           STRAPI_URL: `https://${this.props.elbSubdomain}.${this.props.domainName}`,
           PUBLIC_ADMIN_URL: `https://${this.props.elbSubdomain}.${this.props.domainName}/admin`
@@ -199,7 +202,7 @@ export class StrapiServerlessStack extends Stack {
     this.creds.grantRead(this.fargateService.taskDefinition.taskRole);
     this.jwtSecret.grantRead(this.fargateService.taskDefinition.taskRole);
     this.saltSecret.grantRead(this.fargateService.taskDefinition.taskRole);
-    this.webAssetBucket.grantRead(this.fargateService.taskDefinition.taskRole);
+    this.strapiAssetBucket.grantReadWrite(this.fargateService.taskDefinition.taskRole);
   }
 
   createCloudfrontDistribution() {

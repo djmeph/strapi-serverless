@@ -1,6 +1,6 @@
+FROM public.ecr.aws/amazonlinux/amazonlinux:2@sha256:0f2e782bf231eb88f4e5fb752fedab96d5254627b18aa68f1ef1c4af6050f502
 ARG strapiUrl
 ARG publicAdminUrl
-FROM public.ecr.aws/amazonlinux/amazonlinux:2@sha256:0f2e782bf231eb88f4e5fb752fedab96d5254627b18aa68f1ef1c4af6050f502
 ENV NODE_ENV production
 ENV STRAPI_URL ${strapiUrl}
 ENV PUBLIC_ADMIN_URL ${publicAdminUrl}
