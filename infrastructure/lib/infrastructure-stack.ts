@@ -182,7 +182,6 @@ export class StrapiServerlessStack extends Stack {
           AWS_REGION: this.props.env.region || '',
           CDN_BASE_URL: `https://${this.props.assetsPrefix}.${this.props.domainName}`,
           BUCKET_PREFIX: this.props.assetsPrefix,
-          AWS_S3_ENABLED: 'true'
         },
         logDriver: LogDrivers.awsLogs({
           streamPrefix: this.props.subdomain,

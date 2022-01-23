@@ -1,18 +1,18 @@
-const strapi = require('@strapi/strapi');
-const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
+/* eslint-disable no-undef */
 
-(async () => {
-  const secretsManager = new SecretsManager({});
-  const [credsOutput, jwtSecretOutput, saltSecretOutput] = await Promise.all([
+const AWS = require('aws-sdk');
+const serverless = require('serverless-http');
+const startStrapi = require('strapi/lib/Strapi');
+
+exports.handler = async (event, context) => {
+  const secretsManager = new AWS.SecretsManager();
+  const [credsOutput, jwtSecretOutput] = await Promise.all([
     secretsManager.getSecretValue({
       SecretId: process.env.CREDS_SECRET_ARN
     }),
     secretsManager.getSecretValue({
       SecretId: process.env.JWT_SECRET_ARN
-    }),
-    secretsManager.getSecretValue({
-      SecretId: process.env.SALT_SECRET_ARN
-    }),
+    })
   ]);
   const creds = JSON.parse(credsOutput.SecretString);
 
@@ -22,7 +22,12 @@ const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
   process.env['DB_USER'] = creds.username;
   process.env['DB_PASSWORD'] = creds.password;
   process.env['ADMIN_JWT_SECRET'] = jwtSecretOutput.SecretString;
-  process.env['API_TOKEN_SALT'] = saltSecretOutput.SecretString;
 
-  await strapi().start();
-})();
+  if (!global.strapi) {
+    strapi = startStrapi({ dir: __dirname });
+    await strapi.start();
+  }
+
+  const handler = serverless(global.strapi.app);
+  return handler(event, context);
+};
