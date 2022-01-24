@@ -9,9 +9,7 @@ export interface InfrastructureStackProps extends StackProps {
   domainName: string;
   subdomain: string;
   certificateArn: string;
-  logGroupName: string;
-  elbSubdomain: string;
-  assetsPrefix: string;
+  apiSubdomain: string;
 }
 
 /*

@@ -9,10 +9,10 @@ exports.handler = async (event, context) => {
   const [credsOutput, jwtSecretOutput] = await Promise.all([
     secretsManager.getSecretValue({
       SecretId: process.env.CREDS_SECRET_ARN
-    }),
+    }).promise(),
     secretsManager.getSecretValue({
       SecretId: process.env.JWT_SECRET_ARN
-    })
+    }).promise(),
   ]);
   const creds = JSON.parse(credsOutput.SecretString);
 
