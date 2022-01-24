@@ -5,7 +5,7 @@ module.exports = ({ env }) => ({
   admin: {
     serveAdminPanel: env.bool('SERVE_ADMIN', true),
     autoOpen: false,
-    url: '/',
+    url: env('STRAPI_ADMIN_URL', '/'),
     auth: {
       secret: env('ADMIN_JWT_SECRET', 'ywGVzeJPrr6N2VV5c72W'),
     },
