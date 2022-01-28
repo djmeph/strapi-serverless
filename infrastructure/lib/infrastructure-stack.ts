@@ -1,18 +1,9 @@
-import { Stack } from 'aws-cdk-lib';
-import { InstanceType, IVpc, NatProvider, Peer, Port, SecurityGroup, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
-import { AuroraMysqlEngineVersion, DatabaseClusterEngine, ServerlessCluster } from 'aws-cdk-lib/aws-rds';
-import { Bucket, IBucket } from 'aws-cdk-lib/aws-s3';
-import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import { CfnOutput, Stack } from 'aws-cdk-lib';
+import { BlockDeviceVolume, EbsDeviceVolumeType, GenericLinuxImage, Instance, InstanceType, IVpc, NatProvider, Peer, Port, SecurityGroup, SubnetType, UserData, Vpc } from 'aws-cdk-lib/aws-ec2';
+import { AuroraMysqlEngineVersion, AuroraPostgresEngineVersion, DatabaseClusterEngine, ServerlessCluster } from 'aws-cdk-lib/aws-rds';
+import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
-import * as path from 'path';
 import { InfrastructureStackProps } from './infrastructure-interface';
-import { Certificate, ICertificate } from 'aws-cdk-lib/aws-certificatemanager';
-import { HostedZone, IHostedZone } from 'aws-cdk-lib/aws-route53';
-import { LogGroup } from 'aws-cdk-lib/aws-logs';
-import { DockerImageAsset } from 'aws-cdk-lib/aws-ecr-assets';
-import { ApplicationLoadBalancedFargateService } from 'aws-cdk-lib/aws-ecs-patterns';
-import { ContainerImage, LogDrivers } from 'aws-cdk-lib/aws-ecs';
-import { ApplicationProtocol, SslPolicy } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 
 const cidrBlocks = {
   vpcCidr: '10.1.0.0/16',
@@ -26,24 +17,17 @@ const cidrBlocks = {
 
 export class StrapiServerlessStack extends Stack {
   vpc: IVpc;
-  rdsCluster: ServerlessCluster;
-  certificate: ICertificate;
-  domainZone: IHostedZone;
-  creds: ISecret;
-  jwtSecret: ISecret;
-  strapiAssetBucket: IBucket;
-  apiLogGroup: LogGroup;
+  bucket: Bucket;
+  db: ServerlessCluster;
+  instance: Instance;
 
   constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
     super(scope, id, props);
     this.createVPC();
-    this.createSecrets();
-    this.createBuckets();
-    this.createRDSCluster();
-    this.createCertificate();
-    this.createHostedZone();
-    this.createLogGroup();
-    this.createFargateService();
+    this.createBucket();
+    this.createRdsDatabase();
+    this.createEc2Instance();
+    this.createOutputs();
   }
 
   createVPC() {
@@ -74,18 +58,11 @@ export class StrapiServerlessStack extends Stack {
     });
   }
 
-  createSecrets() {
-    this.jwtSecret = new Secret(this, 'JwtSecret', {
-      secretName: 'strapi-jwt-secret',
-      description: 'Strapi JWT Secret'
-    });
+  createBucket() {
+    this.bucket = new Bucket(this, 'Bucket');
   }
 
-  createBuckets() {
-    this.strapiAssetBucket = new Bucket(this, 'StrapiAssetBucket');
-  }
-
-  createRDSCluster() {
+  createRdsDatabase() {
     const rdsSecurityGroup = new SecurityGroup(this, 'RDSSecurityGroup', {
       vpc: this.vpc,
       description: 'Ingress access to RDS'
@@ -94,11 +71,11 @@ export class StrapiServerlessStack extends Stack {
     for (const cidr of Object.values(cidrBlocks)) {
       rdsSecurityGroup.addIngressRule(
         Peer.ipv4(cidr),
-        Port.allTcp()
+        Port.tcp(3306)
       )
     }
 
-    this.rdsCluster = new ServerlessCluster(this, 'RdsCluster', {
+    this.db = new ServerlessCluster(this, 'RdsCluster', {
       engine: DatabaseClusterEngine.auroraMysql({
         version: AuroraMysqlEngineVersion.VER_5_7_12
       }),
@@ -109,74 +86,61 @@ export class StrapiServerlessStack extends Stack {
       },
       securityGroups: [rdsSecurityGroup]
     });
-
-    if (this.rdsCluster.secret) {
-      this.creds = this.rdsCluster.secret;
-    }
   }
 
-  createCertificate() {
-    this.certificate = Certificate.fromCertificateArn(
-      this,
-      'SSLCertificate',
-      this.props.certificateArn
-    );
-  }
+  createEc2Instance() {
+    if (!this.props?.env?.region) return;
 
-  createHostedZone() {
-    this.domainZone = HostedZone.fromLookup(this, 'HostedZone', {
-      domainName: this.props.domainName
-    });
-  }
-
-  createLogGroup() {
-    this.apiLogGroup = new LogGroup(this, 'ApiLogGroup', {
-      logGroupName: this.props.logGroupName
-    });
-  }
-
-  createFargateService() {
-    const imageAsset = new DockerImageAsset(this, 'DockerImageAsset', {
-      directory: path.join(__dirname, '../..', 'backend/docker'),
-      buildArgs: {
-        strapiUrl: `https://${this.props.subdomain}.${this.props.domainName}`,
-        publicAdminUrl: `https://${this.props.subdomain}.${this.props.domainName}/admin`
-      }
-    });
-
-    const fargateService = new ApplicationLoadBalancedFargateService(this, 'LoadBalancedFargateService', {
-      desiredCount: 1,
-      cpu: 512,
-      memoryLimitMiB: 4096,
-      taskImageOptions: {
-        image: ContainerImage.fromDockerImageAsset(imageAsset),
-        environment: {
-          NODE_ENV: 'production',
-          JWT_SECRET_ARN: this.jwtSecret.secretArn,
-          CREDS_SECRET_ARN: this.creds.secretArn,
-          ASSETS_BUCKET: this.strapiAssetBucket.bucketName,
-          PORT: '80',
-          STRAPI_URL: `https://${this.props.subdomain}.${this.props.domainName}`,
-          STRAPI_ADMIN_URL: `https://${this.props.subdomain}.${this.props.domainName}/admin`
-        },
-        logDriver: LogDrivers.awsLogs({
-          streamPrefix: this.props.subdomain,
-          logGroup: this.apiLogGroup,
-        }),
-        enableLogging: true,
-      },
-      publicLoadBalancer: true,
+    const securityGroup = new SecurityGroup(this, 'Ec2SecurityGroup', {
       vpc: this.vpc,
-      sslPolicy: SslPolicy.RECOMMENDED,
-      redirectHTTP: true,
-      protocol: ApplicationProtocol.HTTPS,
-      certificate: this.certificate,
-      domainName: `${this.props.subdomain}.${this.props.domainName}`,
-      domainZone: this.domainZone
+    });
+    securityGroup.addIngressRule(Peer.anyIpv4(), Port.tcp(22));
+    securityGroup.addIngressRule(Peer.anyIpv4(), Port.tcp(80));
+    securityGroup.addIngressRule(Peer.anyIpv6(), Port.tcp(80));
+    securityGroup.addIngressRule(Peer.anyIpv4(), Port.tcp(443));
+    securityGroup.addIngressRule(Peer.anyIpv6(), Port.tcp(443));
+    securityGroup.addIngressRule(Peer.anyIpv4(), Port.tcp(1337));
+    securityGroup.addIngressRule(Peer.anyIpv6(), Port.tcp(1337));
+
+    const userData = UserData.forLinux();
+    userData.addCommands(
+      'apt update && apt upgrade',
+      'curl -sL https://deb.nodesource.com/setup_14.x | bash -',
+      'apt-get install -y nodejs build-essential python'
+    );
+
+    this.instance = new Instance(this, 'Ec2Instance', {
+      instanceType: new InstanceType('t2.small'),
+      machineImage: new GenericLinuxImage({
+        [this.props.env.region]: 'ami-04505e74c0741db8d'
+      }),
+      vpc: this.vpc,
+      vpcSubnets: {
+        subnetType: SubnetType.PUBLIC
+      },
+      keyName: 'ponystream-dev',
+      securityGroup,
+      blockDevices: [{
+        deviceName: '/dev/sda1',
+        volume: BlockDeviceVolume.ebs(8, {
+          volumeType: EbsDeviceVolumeType.GENERAL_PURPOSE_SSD
+        })
+      }],
+      userData
+    });
+  }
+
+  createOutputs() {
+    new CfnOutput(this, 'Ec2PublicIp', {
+      value: this.instance.instancePublicIp
     });
 
-    this.creds.grantRead(fargateService.taskDefinition.taskRole);
-    this.jwtSecret.grantRead(fargateService.taskDefinition.taskRole);
-    this.strapiAssetBucket.grantReadWrite(fargateService.taskDefinition.taskRole);
+    new CfnOutput(this, 'CredsSecretArn', {
+      value: this.db.secret?.secretArn || ''
+    });
+
+    new CfnOutput(this, 'BucketName', {
+      value: this.bucket.bucketName
+    })
   }
 }
