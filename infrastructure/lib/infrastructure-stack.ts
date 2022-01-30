@@ -9,7 +9,7 @@ import { Construct } from 'constructs';
 import { InfrastructureStackProps } from './infrastructure-interface';
 import * as path from 'path';
 import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
-import { Effect, ManagedPolicy, PolicyStatement } from 'aws-cdk-lib/aws-iam';
+import { Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Code, DockerImageCode, DockerImageFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { LambdaRestApi } from 'aws-cdk-lib/aws-apigateway';
 import { ApiGateway } from 'aws-cdk-lib/aws-route53-targets';
@@ -185,7 +185,7 @@ export class StrapiServerlessStack extends Stack {
       ],
     });
 
-    const credsPolicyStatement = new PolicyStatement({
+    const secretsPolicyStatement = new PolicyStatement({
       actions: [
         'secretsmanager:DescribeSecret',
         'secretsmanager:GetSecretValue',
@@ -198,7 +198,7 @@ export class StrapiServerlessStack extends Stack {
       ],
     });
 
-    this.func.role?.addToPrincipalPolicy(credsPolicyStatement);
+    this.func.role?.addToPrincipalPolicy(secretsPolicyStatement);
     this.func.role?.addToPrincipalPolicy(s3PolicyStatement);
 
     this.api = new LambdaRestApi(this, 'LambdaRestApi', {
