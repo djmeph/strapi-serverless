@@ -25,4 +25,4 @@ const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
     strapi = startStrapi({ dir: __dirname });
   }
   await strapi.start();
-})();
+})().catch((err) => console.error(err));

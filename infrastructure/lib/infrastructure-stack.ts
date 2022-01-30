@@ -1,9 +1,19 @@
 import { CfnOutput, Stack } from 'aws-cdk-lib';
-import { BlockDeviceVolume, EbsDeviceVolumeType, GenericLinuxImage, Instance, InstanceType, IVpc, NatProvider, Peer, Port, SecurityGroup, SubnetType, UserData, Vpc } from 'aws-cdk-lib/aws-ec2';
-import { AuroraMysqlEngineVersion, AuroraPostgresEngineVersion, DatabaseClusterEngine, ServerlessCluster } from 'aws-cdk-lib/aws-rds';
+import { Certificate, ICertificate } from 'aws-cdk-lib/aws-certificatemanager';
+import { InstanceType, IVpc, NatProvider, Peer, Port, SecurityGroup, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
+import { LogGroup } from 'aws-cdk-lib/aws-logs';
+import { AuroraMysqlEngineVersion, DatabaseClusterEngine, ServerlessCluster } from 'aws-cdk-lib/aws-rds';
+import { HostedZone, IHostedZone } from 'aws-cdk-lib/aws-route53';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import { InfrastructureStackProps } from './infrastructure-interface';
+import * as path from 'path';
+import { ApplicationLoadBalancedFargateService } from 'aws-cdk-lib/aws-ecs-patterns';
+import { DockerImageAsset } from 'aws-cdk-lib/aws-ecr-assets';
+import { ContainerImage, LogDrivers } from 'aws-cdk-lib/aws-ecs';
+import { ApplicationProtocol, SslPolicy } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
+import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
+import { ManagedPolicy } from 'aws-cdk-lib/aws-iam';
 
 const cidrBlocks = {
   vpcCidr: '10.1.0.0/16',
@@ -19,14 +29,22 @@ export class StrapiServerlessStack extends Stack {
   vpc: IVpc;
   bucket: Bucket;
   db: ServerlessCluster;
-  instance: Instance;
+  certificate: ICertificate;
+  domainZone: IHostedZone;
+  apiLogGroup: LogGroup;
+  jwtSecret: Secret;
+  creds: ISecret;
 
   constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
     super(scope, id, props);
     this.createVPC();
+    this.createSecrets();
     this.createBucket();
     this.createRdsDatabase();
-    this.createEc2Instance();
+    this.createCertificate();
+    this.createHostedZone();
+    this.createLogGroup();
+    this.createFargateService();
     this.createOutputs();
   }
 
@@ -58,6 +76,13 @@ export class StrapiServerlessStack extends Stack {
     });
   }
 
+  createSecrets() {
+    this.jwtSecret = new Secret(this, 'JwtSecret', {
+      secretName: 'strapi-jwt-secret',
+      description: 'Strapi JWT Secret'
+    });
+  }
+
   createBucket() {
     this.bucket = new Bucket(this, 'Bucket');
   }
@@ -86,55 +111,86 @@ export class StrapiServerlessStack extends Stack {
       },
       securityGroups: [rdsSecurityGroup]
     });
+
+    if (this.db.secret) {
+      this.creds = this.db.secret;
+    }
   }
 
-  createEc2Instance() {
-    if (!this.props?.env?.region) return;
-
-    const securityGroup = new SecurityGroup(this, 'Ec2SecurityGroup', {
-      vpc: this.vpc,
-    });
-    securityGroup.addIngressRule(Peer.anyIpv4(), Port.tcp(22));
-    securityGroup.addIngressRule(Peer.anyIpv4(), Port.tcp(80));
-    securityGroup.addIngressRule(Peer.anyIpv6(), Port.tcp(80));
-    securityGroup.addIngressRule(Peer.anyIpv4(), Port.tcp(443));
-    securityGroup.addIngressRule(Peer.anyIpv6(), Port.tcp(443));
-    securityGroup.addIngressRule(Peer.anyIpv4(), Port.tcp(1337));
-    securityGroup.addIngressRule(Peer.anyIpv6(), Port.tcp(1337));
-
-    const userData = UserData.forLinux();
-    userData.addCommands(
-      'apt update && apt upgrade',
-      'curl -sL https://deb.nodesource.com/setup_14.x | bash -',
-      'apt-get install -y nodejs build-essential python'
+  createCertificate() {
+    this.certificate = Certificate.fromCertificateArn(
+      this,
+      'SSLCertificate',
+      this.props.certificateArn
     );
+  }
 
-    this.instance = new Instance(this, 'Ec2Instance', {
-      instanceType: new InstanceType('t2.small'),
-      machineImage: new GenericLinuxImage({
-        [this.props.env.region]: 'ami-04505e74c0741db8d'
-      }),
-      vpc: this.vpc,
-      vpcSubnets: {
-        subnetType: SubnetType.PUBLIC
-      },
-      keyName: 'ponystream-dev',
-      securityGroup,
-      blockDevices: [{
-        deviceName: '/dev/sda1',
-        volume: BlockDeviceVolume.ebs(8, {
-          volumeType: EbsDeviceVolumeType.GENERAL_PURPOSE_SSD
-        })
-      }],
-      userData
+  createHostedZone() {
+    this.domainZone = HostedZone.fromLookup(this, 'HostedZone', {
+      domainName: this.props.domainName
     });
+  }
+
+  createLogGroup() {
+    this.apiLogGroup = new LogGroup(this, 'ApiLogGroup', {
+      logGroupName: this.props.logGroupName
+    });
+  }
+
+  createFargateService() {
+    if (!this.props.env.region) return ;
+
+    const imageAsset = new DockerImageAsset(this, 'DockerImageAsset', {
+      directory: path.join(__dirname, '../..', 'backend/docker'),
+      buildArgs: {
+        strapiUrl: `https://${this.props.subdomain}.${this.props.domainName}`,
+        publicAdminUrl: `https://${this.props.subdomain}.${this.props.domainName}/admin`
+      }
+    });
+
+    const fargateService = new ApplicationLoadBalancedFargateService(this, 'LoadBalancedFargateService', {
+      desiredCount: 1,
+      cpu: 512,
+      memoryLimitMiB: 2048,
+      taskImageOptions: {
+        image: ContainerImage.fromDockerImageAsset(imageAsset),
+        environment: {
+          NODE_ENV: 'production',
+          JWT_SECRET_ARN: this.jwtSecret.secretArn,
+          CREDS_SECRET_ARN: this.creds.secretArn,
+          PORT: '80',
+          AWS_REGION: this.props.env.region,
+          AWS_BUCKET_NAME: this.bucket.bucketName,
+        },
+        logDriver: LogDrivers.awsLogs({
+          streamPrefix: this.props.subdomain,
+          logGroup: this.apiLogGroup,
+        }),
+        enableLogging: true
+      },
+      publicLoadBalancer: true,
+      vpc: this.vpc,
+      sslPolicy: SslPolicy.RECOMMENDED,
+      redirectHTTP: true,
+      protocol: ApplicationProtocol.HTTPS,
+      certificate: this.certificate,
+      domainName: `${this.props.subdomain}.${this.props.domainName}`,
+      domainZone: this.domainZone
+    });
+
+    // this.creds.grantRead(fargateService.taskDefinition.taskRole);
+    // this.jwtSecret.grantRead(fargateService.taskDefinition.taskRole);
+    // this.bucket.grantReadWrite(fargateService.taskDefinition.taskRole);
+
+    fargateService.taskDefinition.taskRole.addManagedPolicy(
+      ManagedPolicy.fromManagedPolicyArn(this, 'AmazonS3FullAccess', 'arn:aws:iam::aws:policy/AmazonS3FullAccess')
+    );
+    fargateService.taskDefinition.taskRole.addManagedPolicy(
+      ManagedPolicy.fromManagedPolicyArn(this, 'SecretsManagerReadWrite', 'arn:aws:iam::aws:policy/SecretsManagerReadWrite')
+    );
   }
 
   createOutputs() {
-    new CfnOutput(this, 'Ec2PublicIp', {
-      value: this.instance.instancePublicIp
-    });
-
     new CfnOutput(this, 'CredsSecretArn', {
       value: this.db.secret?.secretArn || ''
     });
