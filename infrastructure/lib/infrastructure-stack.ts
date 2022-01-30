@@ -1,4 +1,4 @@
-import { CfnOutput, Duration, Stack } from 'aws-cdk-lib';
+import { CfnOutput, Duration, Fn, Stack } from 'aws-cdk-lib';
 import { Certificate, ICertificate } from 'aws-cdk-lib/aws-certificatemanager';
 import { InstanceType, IVpc, NatProvider, Peer, Port, SecurityGroup, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
 import { LogGroup } from 'aws-cdk-lib/aws-logs';
@@ -9,7 +9,7 @@ import { Construct } from 'constructs';
 import { InfrastructureStackProps } from './infrastructure-interface';
 import * as path from 'path';
 import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
-import { ManagedPolicy } from 'aws-cdk-lib/aws-iam';
+import { Effect, ManagedPolicy, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Code, DockerImageCode, DockerImageFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { LambdaRestApi } from 'aws-cdk-lib/aws-apigateway';
 import { ApiGateway } from 'aws-cdk-lib/aws-route53-targets';
@@ -166,12 +166,40 @@ export class StrapiServerlessStack extends Stack {
       },
     });
 
-    this.func.role?.addManagedPolicy(
-      ManagedPolicy.fromManagedPolicyArn(this, 'AmazonS3FullAccess', 'arn:aws:iam::aws:policy/AmazonS3FullAccess')
-    );
-    this.func.role?.addManagedPolicy(
-      ManagedPolicy.fromManagedPolicyArn(this, 'SecretsManagerReadWrite', 'arn:aws:iam::aws:policy/SecretsManagerReadWrite')
-    );
+    const s3PolicyStatement = new PolicyStatement({
+      actions: [
+        's3:PutObject',
+        's3:GetObjectAcl',
+        's3:GetObject',
+        's3:AbortMultipartUpload',
+        's3:ListBucket',
+        's3:DeleteObject',
+        's3:PutObjectAcl',
+        's3:GetObjectAcl',
+        's3:PutObjectAcl'
+      ],
+      effect: Effect.ALLOW,
+      resources: [
+        this.assetsBucket.bucketArn,
+        Fn.join('/', [this.assetsBucket.bucketArn, '*'])
+      ],
+    });
+
+    const credsPolicyStatement = new PolicyStatement({
+      actions: [
+        'secretsmanager:DescribeSecret',
+        'secretsmanager:GetSecretValue',
+        'secretsmanager:ListSecretVersionIds'
+      ],
+      effect: Effect.ALLOW,
+      resources: [
+        this.creds.secretArn,
+        this.jwtSecret.secretArn
+      ],
+    });
+
+    this.func.role?.addToPrincipalPolicy(credsPolicyStatement);
+    this.func.role?.addToPrincipalPolicy(s3PolicyStatement);
 
     this.api = new LambdaRestApi(this, 'LambdaRestApi', {
       handler: this.func,
