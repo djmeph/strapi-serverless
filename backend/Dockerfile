@@ -1,18 +1,16 @@
-FROM public.ecr.aws/amazonlinux/amazonlinux:2@sha256:0f2e782bf231eb88f4e5fb752fedab96d5254627b18aa68f1ef1c4af6050f502
-# ARG strapiUrl
-# ARG publicAdminUrl
+FROM public.ecr.aws/lambda/nodejs:14@sha256:209eaa0ac09c930273a46e4bf1b5bac729e04ccc6f8fb9943cb26e2028c67fde
+ARG strapiUrl
+ARG publicAdminUrl
 ENV NODE_ENV production
-# ENV STRAPI_URL ${strapiUrl}
-# ENV STRAPI_ADMIN_URL ${publicAdminUrl}
-WORKDIR /src
-RUN curl -sL https://rpm.nodesource.com/setup_14.x | bash - && yum install -y nodejs
+ENV STRAPI_URL ${strapiUrl}
+ENV STRAPI_ADMIN_URL ${publicAdminUrl}
+WORKDIR /var/task/
 RUN npm i -g yarn
 COPY package.json yarn.lock ./
 RUN yarn --prod --frozen-lockfile
-COPY favicon.ico server.js ./
+COPY favicon.ico lambda.js ./
 COPY api ./api
 # COPY components ./components
 COPY config ./config
 COPY extensions ./extensions
-RUN yarn build
-CMD ["node", "server"]
+CMD ["lambda.handler"]

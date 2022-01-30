@@ -1,19 +1,21 @@
-import { CfnOutput, Stack } from 'aws-cdk-lib';
+import { CfnOutput, Duration, Stack } from 'aws-cdk-lib';
 import { Certificate, ICertificate } from 'aws-cdk-lib/aws-certificatemanager';
 import { InstanceType, IVpc, NatProvider, Peer, Port, SecurityGroup, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
 import { LogGroup } from 'aws-cdk-lib/aws-logs';
 import { AuroraMysqlEngineVersion, DatabaseClusterEngine, ServerlessCluster } from 'aws-cdk-lib/aws-rds';
-import { HostedZone, IHostedZone } from 'aws-cdk-lib/aws-route53';
+import { ARecord, CnameRecord, HostedZone, IHostedZone, RecordTarget } from 'aws-cdk-lib/aws-route53';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import { InfrastructureStackProps } from './infrastructure-interface';
 import * as path from 'path';
-import { ApplicationLoadBalancedFargateService } from 'aws-cdk-lib/aws-ecs-patterns';
-import { DockerImageAsset } from 'aws-cdk-lib/aws-ecr-assets';
-import { ContainerImage, LogDrivers } from 'aws-cdk-lib/aws-ecs';
-import { ApplicationProtocol, SslPolicy } from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { ManagedPolicy } from 'aws-cdk-lib/aws-iam';
+import { Code, DockerImageCode, DockerImageFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { LambdaRestApi } from 'aws-cdk-lib/aws-apigateway';
+import { ApiGateway } from 'aws-cdk-lib/aws-route53-targets';
+import { CloudFrontWebDistribution, LambdaEdgeEventType, OriginAccessIdentity, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
+import { experimental } from 'aws-cdk-lib/aws-cloudfront';
+import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
 
 const cidrBlocks = {
   vpcCidr: '10.1.0.0/16',
@@ -27,13 +29,18 @@ const cidrBlocks = {
 
 export class StrapiServerlessStack extends Stack {
   vpc: IVpc;
-  bucket: Bucket;
+  assetsBucket: Bucket;
+  adminBucket: Bucket;
+  oai: OriginAccessIdentity;
   db: ServerlessCluster;
   certificate: ICertificate;
   domainZone: IHostedZone;
   apiLogGroup: LogGroup;
   jwtSecret: Secret;
   creds: ISecret;
+  func: DockerImageFunction;
+  api: LambdaRestApi;
+  distribution: CloudFrontWebDistribution;
 
   constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
     super(scope, id, props);
@@ -43,8 +50,9 @@ export class StrapiServerlessStack extends Stack {
     this.createRdsDatabase();
     this.createCertificate();
     this.createHostedZone();
-    this.createLogGroup();
-    this.createFargateService();
+    this.createLambdaFunction();
+    this.createDistribution();
+    this.deployAdminWebAssets();
     this.createOutputs();
   }
 
@@ -84,7 +92,10 @@ export class StrapiServerlessStack extends Stack {
   }
 
   createBucket() {
-    this.bucket = new Bucket(this, 'Bucket');
+    this.assetsBucket = new Bucket(this, 'Bucket');
+    this.adminBucket = new Bucket(this, 'AdminBucket');
+    this.oai = new OriginAccessIdentity(this, 'OAI');
+    this.adminBucket.grantReadWrite(this.oai);
   }
 
   createRdsDatabase() {
@@ -131,63 +142,130 @@ export class StrapiServerlessStack extends Stack {
     });
   }
 
-  createLogGroup() {
-    this.apiLogGroup = new LogGroup(this, 'ApiLogGroup', {
-      logGroupName: this.props.logGroupName
+  createLambdaFunction() {
+    if (!this.props.env.region) return;
+
+    const code = DockerImageCode.fromImageAsset(path.join(__dirname, '../..', 'backend/docker'));
+
+    this.func = new DockerImageFunction(this, 'LambdaFunction', {
+      code,
+      timeout: Duration.seconds(30),
+      memorySize: 2048,
+      environment: {
+        NODE_ENV: 'production',
+        JWT_SECRET_ARN: this.jwtSecret.secretArn,
+        CREDS_SECRET_ARN: this.creds.secretArn,
+        AWS_BUCKET_NAME: this.assetsBucket.bucketName,
+        STRAPI_URL: `https://${this.props.subdomain}-api.${this.props.domainName}`,
+        STRAPI_ADMIN_URL: `https://${this.props.subdomain}.${this.props.domainName}`,
+        SERVE_ADMIN: 'false',
+      },
+      vpc: this.vpc,
+      vpcSubnets: {
+        subnetType: SubnetType.PRIVATE_WITH_NAT,
+      },
+    });
+
+    this.func.role?.addManagedPolicy(
+      ManagedPolicy.fromManagedPolicyArn(this, 'AmazonS3FullAccess', 'arn:aws:iam::aws:policy/AmazonS3FullAccess')
+    );
+    this.func.role?.addManagedPolicy(
+      ManagedPolicy.fromManagedPolicyArn(this, 'SecretsManagerReadWrite', 'arn:aws:iam::aws:policy/SecretsManagerReadWrite')
+    );
+
+    this.api = new LambdaRestApi(this, 'LambdaRestApi', {
+      handler: this.func,
+      binaryMediaTypes: ['multipart/form-data'],
+      domainName: {
+        certificate: this.certificate,
+        domainName: `${this.props.subdomain}-api.${this.props.domainName}`,
+      },
+    });
+
+    new ARecord(this, 'ApiDNSRecord', {
+      target: RecordTarget.fromAlias(new ApiGateway(this.api)),
+      zone: this.domainZone,
+      recordName: `${this.props.subdomain}-api`
     });
   }
 
-  createFargateService() {
-    if (!this.props.env.region) return ;
-
-    const imageAsset = new DockerImageAsset(this, 'DockerImageAsset', {
-      directory: path.join(__dirname, '../..', 'backend/docker'),
-      buildArgs: {
-        strapiUrl: `https://${this.props.subdomain}.${this.props.domainName}`,
-        publicAdminUrl: `https://${this.props.subdomain}.${this.props.domainName}/admin`
-      }
+  createDistribution() {
+    const lambdaFunction = new experimental.EdgeFunction(this, 'EdgeFunctionOriginResponse', {
+      code: Code.fromAsset(path.join(__dirname, '..', 'lambdas/origin-response')),
+      runtime: Runtime.NODEJS_14_X,
+      handler: 'index.handler',
     });
 
-    const fargateService = new ApplicationLoadBalancedFargateService(this, 'LoadBalancedFargateService', {
-      desiredCount: 1,
-      cpu: 512,
-      memoryLimitMiB: 2048,
-      taskImageOptions: {
-        image: ContainerImage.fromDockerImageAsset(imageAsset),
-        environment: {
-          NODE_ENV: 'production',
-          JWT_SECRET_ARN: this.jwtSecret.secretArn,
-          CREDS_SECRET_ARN: this.creds.secretArn,
-          PORT: '80',
-          AWS_REGION: this.props.env.region,
-          AWS_BUCKET_NAME: this.bucket.bucketName,
+    this.distribution = new CloudFrontWebDistribution(
+      this,
+      'WebDistribution',
+      {
+        originConfigs: [
+          {
+            s3OriginSource: {
+              s3BucketSource: this.adminBucket,
+              originHeaders: {
+                'X-Api-Uri': `https://${this.props.subdomain}-api.${this.props.domainName}`,
+              },
+              originAccessIdentity: this.oai,
+              originPath: '/strapi-admin',
+            },
+            behaviors: [
+              {
+                isDefaultBehavior: true,
+                lambdaFunctionAssociations: [
+                  {
+                    eventType: LambdaEdgeEventType.ORIGIN_RESPONSE,
+                    lambdaFunction,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        viewerCertificate: {
+          aliases: [`${this.props.subdomain}.${this.props.domainName}`],
+          props: {
+            acmCertificateArn: this.certificate.certificateArn,
+            sslSupportMethod: 'sni-only',
+          },
         },
-        logDriver: LogDrivers.awsLogs({
-          streamPrefix: this.props.subdomain,
-          logGroup: this.apiLogGroup,
-        }),
-        enableLogging: true
-      },
-      publicLoadBalancer: true,
-      vpc: this.vpc,
-      sslPolicy: SslPolicy.RECOMMENDED,
-      redirectHTTP: true,
-      protocol: ApplicationProtocol.HTTPS,
-      certificate: this.certificate,
-      domainName: `${this.props.subdomain}.${this.props.domainName}`,
-      domainZone: this.domainZone
+        errorConfigurations: [
+          {
+            errorCode: 404,
+            responseCode: 200,
+            responsePagePath: '/index.html',
+            errorCachingMinTtl: 300,
+          },
+          {
+            errorCode: 403,
+            responseCode: 200,
+            responsePagePath: '/index.html',
+            errorCachingMinTtl: 300,
+          },
+        ],
+      }
+    );
+
+    new CnameRecord(this, 'AdminCNameRecord', {
+      zone: this.domainZone,
+      domainName: this.distribution.distributionDomainName,
+      recordName: this.props.subdomain,
     });
+  }
 
-    // this.creds.grantRead(fargateService.taskDefinition.taskRole);
-    // this.jwtSecret.grantRead(fargateService.taskDefinition.taskRole);
-    // this.bucket.grantReadWrite(fargateService.taskDefinition.taskRole);
-
-    fargateService.taskDefinition.taskRole.addManagedPolicy(
-      ManagedPolicy.fromManagedPolicyArn(this, 'AmazonS3FullAccess', 'arn:aws:iam::aws:policy/AmazonS3FullAccess')
-    );
-    fargateService.taskDefinition.taskRole.addManagedPolicy(
-      ManagedPolicy.fromManagedPolicyArn(this, 'SecretsManagerReadWrite', 'arn:aws:iam::aws:policy/SecretsManagerReadWrite')
-    );
+  deployAdminWebAssets() {
+    new BucketDeployment(this, 'DeployAdminWebAssets', {
+      sources: [
+        Source.asset(path.join(__dirname, '../..', 'backend/build')
+        ),
+      ],
+      destinationBucket: this.adminBucket,
+      destinationKeyPrefix: 'strapi-admin',
+      distribution: this.distribution,
+      distributionPaths: ['/*'],
+    });
   }
 
   createOutputs() {
@@ -196,7 +274,7 @@ export class StrapiServerlessStack extends Stack {
     });
 
     new CfnOutput(this, 'BucketName', {
-      value: this.bucket.bucketName
+      value: this.assetsBucket.bucketName
     })
   }
 }

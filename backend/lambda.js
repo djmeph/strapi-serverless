@@ -1,7 +1,8 @@
 const startStrapi = require('strapi/lib/Strapi');
 const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
+const serverless = require('serverless-http');
 
-(async () => {
+exports.handler = async (event, context) => {
   const secretsManager = new SecretsManager({});
   const [credsOutput, jwtSecretOutput] = await Promise.all([
     secretsManager.getSecretValue({
@@ -21,8 +22,12 @@ const { SecretsManager } = require('@aws-sdk/client-secrets-manager');
   process.env['ADMIN_JWT_SECRET'] = jwtSecretOutput.SecretString;
 
   let strapi;
+
   if (!global.strapi) {
     strapi = startStrapi({ dir: __dirname });
+    await strapi.start();
   }
-  await strapi.start();
-})().catch((err) => console.error(err));
+
+  const handler = serverless(global.strapi.app);
+  return handler(event, context);
+};

@@ -8,7 +8,7 @@
     "start": "strapi start",
     "build": "strapi build",
     "strapi": "strapi",
-    "prepare-docker": "mkdir -p docker; cp -R extensions config api package.json yarn.lock favicon.ico server.js Dockerfile docker/"
+    "prepare-docker": "mkdir -p docker; cp -R extensions config api package.json yarn.lock favicon.ico lambda.js Dockerfile docker/"
   },
   "devDependencies": {},
   "dependencies": {
