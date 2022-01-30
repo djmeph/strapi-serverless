@@ -13,7 +13,7 @@ import { Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Code, DockerImageCode, DockerImageFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { LambdaRestApi } from 'aws-cdk-lib/aws-apigateway';
 import { ApiGateway } from 'aws-cdk-lib/aws-route53-targets';
-import { CloudFrontWebDistribution, LambdaEdgeEventType, OriginAccessIdentity, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
+import { CloudFrontAllowedMethods, CloudFrontWebDistribution, LambdaEdgeEventType, OriginAccessIdentity, OriginProtocolPolicy, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
 import { experimental } from 'aws-cdk-lib/aws-cloudfront';
 import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
 
@@ -250,6 +250,18 @@ export class StrapiServerlessStack extends Stack {
               },
             ],
           },
+          {
+            customOriginSource: {
+              domainName: `${this.props.subdomain}-api.${this.props.domainName}`,
+              originProtocolPolicy: OriginProtocolPolicy.HTTPS_ONLY
+            },
+            behaviors: [
+              {
+                allowedMethods: CloudFrontAllowedMethods.ALL,
+                pathPattern: '/api/*',
+              }
+            ]
+          }
         ],
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         viewerCertificate: {
