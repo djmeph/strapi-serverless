@@ -8,15 +8,20 @@
     "start": "strapi start",
     "build": "strapi build",
     "strapi": "strapi",
-    "prepare-docker": "mkdir -p docker; cp -R extensions config api package.json yarn.lock favicon.ico lambda.js Dockerfile docker/"
+    "ts-node": "ts-node",
+    "prepare-docker": "yarn build:admin && yarn build:docker",
+    "build:admin": "ts-node build.ts",
+    "build:docker": "mkdir -p docker; cp -R extensions config api package.json yarn.lock favicon.ico lambda.js Dockerfile docker/"
   },
-  "devDependencies": {},
+  "devDependencies": {
+    "ts-node": "^10.4.0",
+    "typescript": "^4.5.5"
+  },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "3.48.0",
     "knex": "0.21.18",
     "mysql": "^2.18.1",
     "serverless-http": "^2.7.0",
-    "sqlite3": "5.0.0",
     "strapi": "3.6.8",
     "strapi-admin": "3.6.8",
     "strapi-connector-bookshelf": "3.6.8",
