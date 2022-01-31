@@ -1,13 +1,11 @@
-import { CfnOutput, Duration, Fn, Stack } from 'aws-cdk-lib';
+import { Duration, Fn, Stack } from 'aws-cdk-lib';
 import { Certificate, ICertificate } from 'aws-cdk-lib/aws-certificatemanager';
 import { InstanceType, IVpc, NatProvider, Peer, Port, SecurityGroup, SubnetType, Vpc } from 'aws-cdk-lib/aws-ec2';
-import { LogGroup } from 'aws-cdk-lib/aws-logs';
 import { AuroraMysqlEngineVersion, DatabaseClusterEngine, ServerlessCluster } from 'aws-cdk-lib/aws-rds';
 import { ARecord, CnameRecord, HostedZone, IHostedZone, RecordTarget } from 'aws-cdk-lib/aws-route53';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
 import { InfrastructureStackProps } from './infrastructure-interface';
-import * as path from 'path';
 import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Code, DockerImageCode, DockerImageFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
@@ -16,9 +14,10 @@ import { ApiGateway } from 'aws-cdk-lib/aws-route53-targets';
 import { CloudFrontAllowedMethods, CloudFrontWebDistribution, LambdaEdgeEventType, OriginAccessIdentity, OriginProtocolPolicy, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
 import { experimental } from 'aws-cdk-lib/aws-cloudfront';
 import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
+import * as path from 'path';
 
 const cidrBlocks = {
-  vpcCidr: '10.1.0.0/16',
+  vpcCidr: '10.11.0.0/16',
   publicSubnetACidr: '10.11.0.0/20',
   publicSubnetBCidr: '10.11.16.0/20',
   privateSubnetACidr: '10.11.32.0/20',
@@ -30,16 +29,17 @@ const cidrBlocks = {
 export class StrapiServerlessStack extends Stack {
   vpc: IVpc;
   assetsBucket: Bucket;
-  adminBucket: Bucket;
+  webBucket: Bucket;
   oai: OriginAccessIdentity;
   db: ServerlessCluster;
   certificate: ICertificate;
   domainZone: IHostedZone;
-  apiLogGroup: LogGroup;
   jwtSecret: Secret;
-  creds: ISecret;
+  dbCreds: ISecret;
   func: DockerImageFunction;
   api: LambdaRestApi;
+  cachedFunc: DockerImageFunction;
+  cachedApi: LambdaRestApi;
   distribution: CloudFrontWebDistribution;
 
   constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
@@ -53,7 +53,6 @@ export class StrapiServerlessStack extends Stack {
     this.createLambdaFunction();
     this.createDistribution();
     this.deployAdminWebAssets();
-    this.createOutputs();
   }
 
   createVPC() {
@@ -92,10 +91,10 @@ export class StrapiServerlessStack extends Stack {
   }
 
   createBucket() {
-    this.assetsBucket = new Bucket(this, 'Bucket');
-    this.adminBucket = new Bucket(this, 'AdminBucket');
+    this.assetsBucket = new Bucket(this, 'AssetsBucket');
+    this.webBucket = new Bucket(this, 'WebBucket');
     this.oai = new OriginAccessIdentity(this, 'OAI');
-    this.adminBucket.grantReadWrite(this.oai);
+    this.webBucket.grantReadWrite(this.oai);
   }
 
   createRdsDatabase() {
@@ -124,7 +123,7 @@ export class StrapiServerlessStack extends Stack {
     });
 
     if (this.db.secret) {
-      this.creds = this.db.secret;
+      this.dbCreds = this.db.secret;
     }
   }
 
@@ -154,7 +153,7 @@ export class StrapiServerlessStack extends Stack {
       environment: {
         NODE_ENV: 'production',
         JWT_SECRET_ARN: this.jwtSecret.secretArn,
-        CREDS_SECRET_ARN: this.creds.secretArn,
+        CREDS_SECRET_ARN: this.dbCreds.secretArn,
         AWS_BUCKET_NAME: this.assetsBucket.bucketName,
         STRAPI_URL: `https://${this.props.subdomain}-api.${this.props.domainName}`,
         STRAPI_ADMIN_URL: `https://${this.props.subdomain}.${this.props.domainName}`,
@@ -193,7 +192,7 @@ export class StrapiServerlessStack extends Stack {
       ],
       effect: Effect.ALLOW,
       resources: [
-        this.creds.secretArn,
+        this.dbCreds.secretArn,
         this.jwtSecret.secretArn
       ],
     });
@@ -224,14 +223,11 @@ export class StrapiServerlessStack extends Stack {
       handler: 'index.handler',
     });
 
-    this.distribution = new CloudFrontWebDistribution(
-      this,
-      'WebDistribution',
-      {
+    this.distribution = new CloudFrontWebDistribution(this, 'WebDistribution', {
         originConfigs: [
           {
             s3OriginSource: {
-              s3BucketSource: this.adminBucket,
+              s3BucketSource: this.webBucket,
               originHeaders: {
                 'X-Api-Uri': `https://${this.props.subdomain}-api.${this.props.domainName}`,
               },
@@ -288,7 +284,7 @@ export class StrapiServerlessStack extends Stack {
       }
     );
 
-    new CnameRecord(this, 'AdminCNameRecord', {
+    new CnameRecord(this, 'DistributionCNameRecord', {
       zone: this.domainZone,
       domainName: this.distribution.distributionDomainName,
       recordName: this.props.subdomain,
@@ -301,20 +297,10 @@ export class StrapiServerlessStack extends Stack {
         Source.asset(path.join(__dirname, '../..', 'backend/build')
         ),
       ],
-      destinationBucket: this.adminBucket,
+      destinationBucket: this.webBucket,
       destinationKeyPrefix: 'strapi-admin',
       distribution: this.distribution,
       distributionPaths: ['/*'],
     });
-  }
-
-  createOutputs() {
-    new CfnOutput(this, 'CredsSecretArn', {
-      value: this.db.secret?.secretArn || ''
-    });
-
-    new CfnOutput(this, 'BucketName', {
-      value: this.assetsBucket.bucketName
-    })
   }
 }
