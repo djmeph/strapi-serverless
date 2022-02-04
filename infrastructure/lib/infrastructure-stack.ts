@@ -11,10 +11,11 @@ import { Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
 import { Code, DockerImageCode, DockerImageFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { LambdaRestApi } from 'aws-cdk-lib/aws-apigateway';
 import { ApiGateway } from 'aws-cdk-lib/aws-route53-targets';
-import { CloudFrontAllowedMethods, CloudFrontWebDistribution, LambdaEdgeEventType, OriginAccessIdentity, OriginProtocolPolicy, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
+import { AllowedMethods, CachedMethods, CachePolicy, CloudFrontAllowedMethods, CloudFrontWebDistribution, Distribution, LambdaEdgeEventType, OriginAccessIdentity, OriginProtocolPolicy, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
 import { experimental } from 'aws-cdk-lib/aws-cloudfront';
 import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
 import * as path from 'path';
+import { HttpOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
 
 const cidrBlocks = {
   vpcCidr: '10.11.0.0/16',
@@ -38,9 +39,8 @@ export class StrapiServerlessStack extends Stack {
   dbCreds: ISecret;
   func: DockerImageFunction;
   api: LambdaRestApi;
-  cachedFunc: DockerImageFunction;
-  cachedApi: LambdaRestApi;
   distribution: CloudFrontWebDistribution;
+  cachedDistribution: Distribution;
 
   constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
     super(scope, id, props);
@@ -51,7 +51,7 @@ export class StrapiServerlessStack extends Stack {
     this.createCertificate();
     this.createHostedZone();
     this.createLambdaFunction();
-    this.createDistribution();
+    this.createDistributions();
     this.deployAdminWebAssets();
   }
 
@@ -216,7 +216,7 @@ export class StrapiServerlessStack extends Stack {
     });
   }
 
-  createDistribution() {
+  createDistributions() {
     const lambdaFunction = new experimental.EdgeFunction(this, 'EdgeFunctionOriginResponse', {
       code: Code.fromAsset(path.join(__dirname, '..', 'lambdas/origin-response')),
       runtime: Runtime.NODEJS_14_X,
@@ -246,18 +246,6 @@ export class StrapiServerlessStack extends Stack {
               },
             ],
           },
-          {
-            customOriginSource: {
-              domainName: `${this.props.subdomain}-api.${this.props.domainName}`,
-              originProtocolPolicy: OriginProtocolPolicy.HTTPS_ONLY
-            },
-            behaviors: [
-              {
-                allowedMethods: CloudFrontAllowedMethods.ALL,
-                pathPattern: '/api/*',
-              }
-            ]
-          }
         ],
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
         viewerCertificate: {
@@ -288,6 +276,27 @@ export class StrapiServerlessStack extends Stack {
       zone: this.domainZone,
       domainName: this.distribution.distributionDomainName,
       recordName: this.props.subdomain,
+    });
+
+    if (!this.api.domainName) return;
+
+    this.cachedDistribution = new Distribution(this, 'CachedDistribution', {
+      defaultBehavior: {
+        origin: new HttpOrigin(`${this.props.subdomain}-api.${this.props.domainName}`, {
+          protocolPolicy: OriginProtocolPolicy.HTTPS_ONLY,
+        }),
+        allowedMethods: AllowedMethods.ALLOW_ALL,
+        cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+        cachedMethods: CachedMethods.CACHE_GET_HEAD_OPTIONS,
+      },
+      certificate: this.certificate,
+      domainNames: [`${this.props.subdomain}-cached.${this.props.domainName}`],
+    });
+
+    new CnameRecord(this, 'CachedDistributionCNameRecord', {
+      zone: this.domainZone,
+      domainName: this.cachedDistribution.distributionDomainName,
+      recordName: `${this.props.subdomain}-cached`
     });
   }
 
