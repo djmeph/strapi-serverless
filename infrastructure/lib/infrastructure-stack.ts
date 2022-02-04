@@ -156,7 +156,7 @@ export class StrapiServerlessStack extends Stack {
         CREDS_SECRET_ARN: this.dbCreds.secretArn,
         AWS_BUCKET_NAME: this.assetsBucket.bucketName,
         STRAPI_URL: `https://${this.props.subdomain}-api.${this.props.domainName}`,
-        STRAPI_ADMIN_URL: `https://${this.props.subdomain}.${this.props.domainName}`,
+        STRAPI_ADMIN_URL: `https://${this.props.subdomain}.${this.props.domainName}/admin`,
         SERVE_ADMIN: 'false',
       },
       vpc: this.vpc,
@@ -229,10 +229,11 @@ export class StrapiServerlessStack extends Stack {
             s3OriginSource: {
               s3BucketSource: this.webBucket,
               originHeaders: {
+                'X-Cached-Uri': `https://${this.props.subdomain}-cached.${this.props.domainName}`,
                 'X-Api-Uri': `https://${this.props.subdomain}-api.${this.props.domainName}`,
               },
-              originAccessIdentity: this.oai,
-              originPath: '/strapi-admin',
+              originAccessIdentity:this.oai,
+              originPath: '/nextjs-web'
             },
             behaviors: [
               {
@@ -240,11 +241,11 @@ export class StrapiServerlessStack extends Stack {
                 lambdaFunctionAssociations: [
                   {
                     eventType: LambdaEdgeEventType.ORIGIN_RESPONSE,
-                    lambdaFunction,
-                  },
-                ],
-              },
-            ],
+                    lambdaFunction
+                  }
+                ]
+              }
+            ]
           },
         ],
         viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
@@ -301,15 +302,24 @@ export class StrapiServerlessStack extends Stack {
   }
 
   deployAdminWebAssets() {
-    new BucketDeployment(this, 'DeployAdminWebAssets', {
+    new BucketDeployment(this, 'DeployWebAssets', {
       sources: [
-        Source.asset(path.join(__dirname, '../..', 'backend/build')
-        ),
+        Source.asset(path.join(__dirname, '../../', 'frontend/out'))
       ],
       destinationBucket: this.webBucket,
-      destinationKeyPrefix: 'strapi-admin',
+      destinationKeyPrefix: 'nextjs-web',
       distribution: this.distribution,
       distributionPaths: ['/*'],
+    });
+
+    new BucketDeployment(this, 'DeployAdminWebAssets', {
+      sources: [
+        Source.asset(path.join(__dirname, '../..', 'backend/build')),
+      ],
+      destinationBucket: this.webBucket,
+      destinationKeyPrefix: 'nextjs-web/admin',
+      distribution: this.distribution,
+      distributionPaths: ['/admin/*'],
     });
   }
 }

@@ -4,7 +4,7 @@ import { config } from '../infrastructure/lib/config';
 const command = [
   'NODE_ENV=production',
   `STRAPI_URL=https://${config.subdomain}-api.${config.domainName}`,
-  `STRAPI_ADMIN_URL=https://${config.subdomain}.${config.domainName}`,
+  `STRAPI_ADMIN_URL=https://${config.subdomain}.${config.domainName}/admin`,
   'yarn build'
 ].join(' ');
 
