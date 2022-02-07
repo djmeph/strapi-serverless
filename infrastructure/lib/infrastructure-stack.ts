@@ -217,10 +217,16 @@ export class StrapiServerlessStack extends Stack {
   }
 
   createDistributions() {
-    const lambdaFunction = new experimental.EdgeFunction(this, 'EdgeFunctionOriginResponse', {
+    const originResponse = new experimental.EdgeFunction(this, 'EdgeFunctionOriginResponse', {
       code: Code.fromAsset(path.join(__dirname, '..', 'lambdas/origin-response')),
       runtime: Runtime.NODEJS_14_X,
       handler: 'index.handler',
+    });
+
+    const originRequest = new experimental.EdgeFunction(this, 'EdgeFunctionOriginRequest', {
+      code: Code.fromAsset(path.join(__dirname, '..', 'lambdas/origin-request')),
+      runtime: Runtime.NODEJS_14_X,
+      handler: 'index.handler'
     });
 
     this.distribution = new CloudFrontWebDistribution(this, 'WebDistribution', {
@@ -241,7 +247,11 @@ export class StrapiServerlessStack extends Stack {
                 lambdaFunctionAssociations: [
                   {
                     eventType: LambdaEdgeEventType.ORIGIN_RESPONSE,
-                    lambdaFunction
+                    lambdaFunction: originResponse
+                  },
+                  {
+                    eventType: LambdaEdgeEventType.ORIGIN_REQUEST,
+                    lambdaFunction: originRequest
                   }
                 ]
               }
