@@ -40,6 +40,7 @@ export class StrapiServerlessStack extends Stack {
   func: DockerImageFunction;
   api: LambdaRestApi;
   distribution: CloudFrontWebDistribution;
+  adminDistribution: CloudFrontWebDistribution;
   cachedDistribution: Distribution;
 
   constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
@@ -156,7 +157,7 @@ export class StrapiServerlessStack extends Stack {
         CREDS_SECRET_ARN: this.dbCreds.secretArn,
         AWS_BUCKET_NAME: this.assetsBucket.bucketName,
         STRAPI_URL: `https://${this.props.subdomain}-api.${this.props.domainName}`,
-        STRAPI_ADMIN_URL: `https://${this.props.subdomain}.${this.props.domainName}/admin`,
+        STRAPI_ADMIN_URL: `https://${this.props.subdomain}-admin.${this.props.domainName}`,
         SERVE_ADMIN: 'false',
       },
       vpc: this.vpc,
@@ -223,70 +224,112 @@ export class StrapiServerlessStack extends Stack {
       handler: 'index.handler',
     });
 
-    const originRequest = new experimental.EdgeFunction(this, 'EdgeFunctionOriginRequest', {
-      code: Code.fromAsset(path.join(__dirname, '..', 'lambdas/origin-request')),
-      runtime: Runtime.NODEJS_14_X,
-      handler: 'index.handler'
-    });
-
     this.distribution = new CloudFrontWebDistribution(this, 'WebDistribution', {
-        originConfigs: [
-          {
-            s3OriginSource: {
-              s3BucketSource: this.webBucket,
-              originHeaders: {
-                'X-Cached-Uri': `https://${this.props.subdomain}-cached.${this.props.domainName}`,
-                'X-Api-Uri': `https://${this.props.subdomain}-api.${this.props.domainName}`,
-              },
-              originAccessIdentity:this.oai,
-              originPath: '/nextjs-web'
+      originConfigs: [
+        {
+          s3OriginSource: {
+            s3BucketSource: this.webBucket,
+            originHeaders: {
+              'X-Allowed-Origin-Uri': `https://${this.props.subdomain}-cached.${this.props.domainName}`,
             },
-            behaviors: [
-              {
-                isDefaultBehavior: true,
-                lambdaFunctionAssociations: [
-                  {
-                    eventType: LambdaEdgeEventType.ORIGIN_RESPONSE,
-                    lambdaFunction: originResponse
-                  },
-                  {
-                    eventType: LambdaEdgeEventType.ORIGIN_REQUEST,
-                    lambdaFunction: originRequest
-                  }
-                ]
-              }
-            ]
+            originAccessIdentity:this.oai,
+            originPath: '/nextjs-web'
           },
-        ],
-        viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-        viewerCertificate: {
-          aliases: [`${this.props.subdomain}.${this.props.domainName}`],
-          props: {
-            acmCertificateArn: this.certificate.certificateArn,
-            sslSupportMethod: 'sni-only',
-          },
+          behaviors: [
+            {
+              isDefaultBehavior: true,
+              lambdaFunctionAssociations: [
+                {
+                  eventType: LambdaEdgeEventType.ORIGIN_RESPONSE,
+                  lambdaFunction: originResponse
+                },
+              ]
+            }
+          ]
         },
-        errorConfigurations: [
-          {
-            errorCode: 404,
-            responseCode: 200,
-            responsePagePath: '/index.html',
-            errorCachingMinTtl: 300,
-          },
-          {
-            errorCode: 403,
-            responseCode: 200,
-            responsePagePath: '/index.html',
-            errorCachingMinTtl: 300,
-          },
-        ],
-      }
-    );
+      ],
+      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      viewerCertificate: {
+        aliases: [`${this.props.subdomain}.${this.props.domainName}`],
+        props: {
+          acmCertificateArn: this.certificate.certificateArn,
+          sslSupportMethod: 'sni-only',
+        },
+      },
+      errorConfigurations: [
+        {
+          errorCode: 404,
+          responseCode: 200,
+          responsePagePath: '/index.html',
+          errorCachingMinTtl: 300,
+        },
+        {
+          errorCode: 403,
+          responseCode: 200,
+          responsePagePath: '/index.html',
+          errorCachingMinTtl: 300,
+        },
+      ],
+    });
 
     new CnameRecord(this, 'DistributionCNameRecord', {
       zone: this.domainZone,
       domainName: this.distribution.distributionDomainName,
       recordName: this.props.subdomain,
+    });
+
+    this.adminDistribution = new CloudFrontWebDistribution(this, 'AdminDistribution', {
+      originConfigs: [
+        {
+          s3OriginSource: {
+            s3BucketSource: this.webBucket,
+            originHeaders: {
+              'X-Allowed-Origin-Uri': `https://${this.props.subdomain}-api.${this.props.domainName}`,
+            },
+            originAccessIdentity:this.oai,
+            originPath: '/strapi-admin'
+          },
+          behaviors: [
+            {
+              isDefaultBehavior: true,
+              lambdaFunctionAssociations: [
+                {
+                  eventType: LambdaEdgeEventType.ORIGIN_RESPONSE,
+                  lambdaFunction: originResponse
+                },
+              ]
+            }
+          ]
+        },
+      ],
+      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      viewerCertificate: {
+        aliases: [`${this.props.subdomain}-admin.${this.props.domainName}`],
+        props: {
+          acmCertificateArn: this.certificate.certificateArn,
+          sslSupportMethod: 'sni-only',
+        },
+      },
+      errorConfigurations: [
+        {
+          errorCode: 404,
+          responseCode: 200,
+          responsePagePath: '/index.html',
+          errorCachingMinTtl: 300,
+        },
+        {
+          errorCode: 403,
+          responseCode: 200,
+          responsePagePath: '/index.html',
+          errorCachingMinTtl: 300,
+        },
+      ],
+    });
+
+    new CnameRecord(this, 'AdminDistributionCNameRecord', {
+      zone: this.domainZone,
+      domainName: this.adminDistribution.distributionDomainName,
+      recordName: `${this.props.subdomain}-admin`,
     });
 
     if (!this.api.domainName) return;
@@ -327,9 +370,9 @@ export class StrapiServerlessStack extends Stack {
         Source.asset(path.join(__dirname, '../..', 'backend/build')),
       ],
       destinationBucket: this.webBucket,
-      destinationKeyPrefix: 'nextjs-web/admin',
-      distribution: this.distribution,
-      distributionPaths: ['/admin/*'],
+      destinationKeyPrefix: 'strapi-admin',
+      distribution: this.adminDistribution,
+      distributionPaths: ['/*'],
     });
   }
 }

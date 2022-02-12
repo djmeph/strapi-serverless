@@ -7,12 +7,12 @@ exports.handler = async (event) => {
       },
     },
   } = event.Records[0].cf;
-  const { value: apiUri } = customHeaders['x-api-uri'][0];
+  const { value: allowedOriginUri } = customHeaders['x-allowed-origin-uri'][0];
 
   response.headers['access-control-allow-origin'] = [
     {
       key: 'Access-Control-Allow-Origin',
-      value: apiUri,
+      value: allowedOriginUri,
     },
   ];
 
