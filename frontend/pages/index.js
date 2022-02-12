@@ -1,5 +1,8 @@
 import Head from 'next/head'
 import styles from '../styles/Home.module.css'
+import { QueryClient, QueryClientProvider, useQuery } from 'react-query'
+
+const queryClient = new QueryClient()
 
 export default function Home() {
   return (
@@ -11,9 +14,9 @@ export default function Home() {
       </Head>
 
       <main className={styles.main}>
-        <h1 className={styles.title}>
-          Welcome to <a href="https://nextjs.org">Next.js!</a>
-        </h1>
+        <QueryClientProvider client={queryClient}>
+          <Example />
+        </QueryClientProvider>
 
         <p className={styles.description}>
           Get started by editing{' '}
@@ -51,5 +54,20 @@ export default function Home() {
         </div>
       </main>
     </div>
+  )
+}
+
+function Example() {
+  const { isLoading, err, data } = useQuery('repoData', () =>
+    fetch('http://localhost:1337/page')
+      .then((res) => res.json())
+  );
+
+  if (isLoading) return 'Loading...'
+  if (err) return 'An error has occurred: ' + error.message
+  return (
+    <h1 className={styles.title}>
+      {data.title}
+    </h1>
   )
 }
