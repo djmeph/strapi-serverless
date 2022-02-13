@@ -8,9 +8,10 @@ WORKDIR /var/task/
 RUN npm i -g yarn
 COPY package.json yarn.lock ./
 RUN yarn --prod --frozen-lockfile
+RUN yarn cache clean
 COPY favicon.ico lambda.js ./
 COPY api ./api
-# COPY components ./components
+COPY components ./components
 COPY config ./config
 COPY extensions ./extensions
 CMD ["lambda.handler"]

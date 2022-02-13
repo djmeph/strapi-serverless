@@ -8,11 +8,12 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@apollo/client": "^3.5.8",
+    "graphql": "^16.3.0",
     "next": "12.0.9",
     "next-optimized-images": "^2.6.2",
     "react": "17.0.2",
-    "react-dom": "17.0.2",
-    "react-query": "^3.34.15"
+    "react-dom": "17.0.2"
   },
   "devDependencies": {
     "eslint": "8.8.0",

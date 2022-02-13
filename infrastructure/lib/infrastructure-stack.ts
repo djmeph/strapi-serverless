@@ -204,6 +204,10 @@ export class StrapiServerlessStack extends Stack {
         certificate: this.certificate,
         domainName: `${this.props.subdomain}-api.${this.props.domainName}`,
       },
+      defaultCorsPreflightOptions: {
+        allowOrigins: [`https://${this.props.subdomain}-admin.${this.props.domainName}`],
+        allowMethods: ['OPTIONS', 'HEAD', 'GET', 'POST', 'PUT', 'DELETE'],
+      },
     });
 
     new ARecord(this, 'ApiDNSRecord', {
@@ -214,10 +218,13 @@ export class StrapiServerlessStack extends Stack {
 
     const cachedApi = new LambdaRestApi(this, 'CachedLambdaRestApi', {
       handler: func,
-      binaryMediaTypes: ['multipart/form-data'],
       domainName: {
         certificate: this.certificate,
         domainName: `${this.props.subdomain}-cached.${this.props.domainName}`,
+      },
+      defaultCorsPreflightOptions: {
+        allowOrigins: [`https://${this.props.subdomain}.${this.props.domainName}`],
+        allowMethods: ['OPTIONS', 'HEAD', 'GET', 'POST', 'PUT', 'DELETE'],
       },
       deployOptions: {
         methodOptions: {
@@ -225,7 +232,8 @@ export class StrapiServerlessStack extends Stack {
             cachingEnabled: true,
             cacheTtl: Duration.hours(1),
           }
-        }
+        },
+
       }
     });
 

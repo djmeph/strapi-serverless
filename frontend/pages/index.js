@@ -1,8 +1,17 @@
 import Head from 'next/head'
 import styles from '../styles/Home.module.css'
-import { QueryClient, QueryClientProvider, useQuery } from 'react-query'
+import {
+  ApolloClient,
+  InMemoryCache,
+  ApolloProvider,
+  useQuery,
+  gql
+} from "@apollo/client"
 
-const queryClient = new QueryClient()
+const client = new ApolloClient({
+  uri: `${process.env.NEXT_PUBLIC_API_URI || 'http://localhost:1337/graphql'}`,
+  cache: new InMemoryCache()
+});
 
 export default function Home() {
   return (
@@ -14,9 +23,9 @@ export default function Home() {
       </Head>
 
       <main className={styles.main}>
-        <QueryClientProvider client={queryClient}>
+        <ApolloProvider client={client}>
           <Example />
-        </QueryClientProvider>
+        </ApolloProvider>
 
         <p className={styles.description}>
           Get started by editing{' '}
@@ -58,16 +67,13 @@ export default function Home() {
 }
 
 function Example() {
-  const { isLoading, err, data } = useQuery('repoData', () =>
-    fetch(`${process.env.NEXT_PUBLIC_API_URI || 'http://localhost:1337'}/page`)
-      .then((res) => res.json())
-  );
+  const { loading, err, data } = useQuery(gql`query { page { title } }`);
 
-  if (isLoading) return 'Loading...'
-  if (err) return 'An error has occurred: ' + error.message
+  if (loading) return 'Loading...'
+  if (err) return 'An error has occurred: ' + err.message
   return (
     <h1 className={styles.title}>
-      {data.title}
+      {data.page.title}
     </h1>
   )
 }
