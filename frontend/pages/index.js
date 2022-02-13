@@ -59,7 +59,7 @@ export default function Home() {
 
 function Example() {
   const { isLoading, err, data } = useQuery('repoData', () =>
-    fetch('http://localhost:1337/page')
+    fetch(`${process.env.NEXT_PUBLIC_API_URI || 'http://localhost:1337'}/page`)
       .then((res) => res.json())
   );
 

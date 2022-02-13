@@ -8,14 +8,13 @@ import { Construct } from 'constructs';
 import { InfrastructureStackProps } from './infrastructure-interface';
 import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
-import { Code, DockerImageCode, DockerImageFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
+import { DockerImageCode, DockerImageFunction } from 'aws-cdk-lib/aws-lambda';
 import { LambdaRestApi } from 'aws-cdk-lib/aws-apigateway';
 import { ApiGateway } from 'aws-cdk-lib/aws-route53-targets';
-import { AllowedMethods, CachedMethods, CachePolicy, CloudFrontWebDistribution, Distribution, LambdaEdgeEventType, OriginAccessIdentity, OriginProtocolPolicy, ViewerProtocolPolicy } from 'aws-cdk-lib/aws-cloudfront';
-import { experimental } from 'aws-cdk-lib/aws-cloudfront';
+import { AllowedMethods, CachedMethods, CachePolicy, Distribution, IDistribution, OriginAccessIdentity } from 'aws-cdk-lib/aws-cloudfront';
 import { BucketDeployment, Source } from 'aws-cdk-lib/aws-s3-deployment';
+import { S3Origin } from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as path from 'path';
-import { HttpOrigin } from 'aws-cdk-lib/aws-cloudfront-origins';
 
 const cidrBlocks = {
   vpcCidr: '10.11.0.0/16',
@@ -37,17 +36,14 @@ export class StrapiServerlessStack extends Stack {
   domainZone: IHostedZone;
   jwtSecret: Secret;
   dbCreds: ISecret;
-  func: DockerImageFunction;
-  api: LambdaRestApi;
-  distribution: CloudFrontWebDistribution;
-  adminDistribution: CloudFrontWebDistribution;
-  cachedDistribution: Distribution;
+  distribution: IDistribution;
+  adminDistribution: IDistribution;
 
   constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
     super(scope, id, props);
     this.createVPC();
     this.createSecrets();
-    this.createBucket();
+    this.createBuckets();
     this.createRdsDatabase();
     this.createCertificate();
     this.createHostedZone();
@@ -91,7 +87,7 @@ export class StrapiServerlessStack extends Stack {
     });
   }
 
-  createBucket() {
+  createBuckets() {
     this.assetsBucket = new Bucket(this, 'AssetsBucket');
     this.webBucket = new Bucket(this, 'WebBucket');
     this.oai = new OriginAccessIdentity(this, 'OAI');
@@ -143,12 +139,12 @@ export class StrapiServerlessStack extends Stack {
   }
 
   createLambdaFunction() {
-    if (!this.props.env.region) return;
+    if (!this.props.env.region) throw Error('Region missing from config');
 
-    const code = DockerImageCode.fromImageAsset(path.join(__dirname, '../..', 'backend/docker'));
-
-    this.func = new DockerImageFunction(this, 'LambdaFunction', {
-      code,
+    const func = new DockerImageFunction(this, 'LambdaFunction', {
+      code: DockerImageCode.fromImageAsset(
+        path.join(__dirname, '../..', 'backend/docker')
+      ),
       timeout: Duration.seconds(30),
       memorySize: 2048,
       environment: {
@@ -198,11 +194,11 @@ export class StrapiServerlessStack extends Stack {
       ],
     });
 
-    this.func.role?.addToPrincipalPolicy(secretsPolicyStatement);
-    this.func.role?.addToPrincipalPolicy(s3PolicyStatement);
+    func.role?.addToPrincipalPolicy(secretsPolicyStatement);
+    func.role?.addToPrincipalPolicy(s3PolicyStatement);
 
-    this.api = new LambdaRestApi(this, 'LambdaRestApi', {
-      handler: this.func,
+    const api = new LambdaRestApi(this, 'LambdaRestApi', {
+      handler: func,
       binaryMediaTypes: ['multipart/form-data'],
       domainName: {
         certificate: this.certificate,
@@ -211,65 +207,60 @@ export class StrapiServerlessStack extends Stack {
     });
 
     new ARecord(this, 'ApiDNSRecord', {
-      target: RecordTarget.fromAlias(new ApiGateway(this.api)),
+      target: RecordTarget.fromAlias(new ApiGateway(api)),
       zone: this.domainZone,
       recordName: `${this.props.subdomain}-api`
+    });
+
+    const cachedApi = new LambdaRestApi(this, 'CachedLambdaRestApi', {
+      handler: func,
+      binaryMediaTypes: ['multipart/form-data'],
+      domainName: {
+        certificate: this.certificate,
+        domainName: `${this.props.subdomain}-cached.${this.props.domainName}`,
+      },
+      deployOptions: {
+        methodOptions: {
+          '/*/*': {
+            cachingEnabled: true,
+            cacheTtl: Duration.hours(1),
+          }
+        }
+      }
+    });
+
+    new ARecord(this, 'CachedApiDNSRecord', {
+      target: RecordTarget.fromAlias(new ApiGateway(cachedApi)),
+      zone: this.domainZone,
+      recordName: `${this.props.subdomain}-cached`
     });
   }
 
   createDistributions() {
-    const originResponse = new experimental.EdgeFunction(this, 'EdgeFunctionOriginResponse', {
-      code: Code.fromAsset(path.join(__dirname, '..', 'lambdas/origin-response')),
-      runtime: Runtime.NODEJS_14_X,
-      handler: 'index.handler',
-    });
-
-    this.distribution = new CloudFrontWebDistribution(this, 'WebDistribution', {
-      originConfigs: [
-        {
-          s3OriginSource: {
-            s3BucketSource: this.webBucket,
-            originHeaders: {
-              'X-Allowed-Origin-Uri': `https://${this.props.subdomain}-cached.${this.props.domainName}`,
-            },
-            originAccessIdentity:this.oai,
-            originPath: '/nextjs-web'
-          },
-          behaviors: [
-            {
-              isDefaultBehavior: true,
-              lambdaFunctionAssociations: [
-                {
-                  eventType: LambdaEdgeEventType.ORIGIN_RESPONSE,
-                  lambdaFunction: originResponse
-                },
-              ]
-            }
-          ]
-        },
-      ],
-      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-      viewerCertificate: {
-        aliases: [`${this.props.subdomain}.${this.props.domainName}`],
-        props: {
-          acmCertificateArn: this.certificate.certificateArn,
-          sslSupportMethod: 'sni-only',
-        },
+    this.distribution = new Distribution(this, 'WebDistribution', {
+      defaultBehavior: {
+        origin: new S3Origin(this.webBucket, {
+          originPath: '/nextjs-web',
+          originAccessIdentity: this.oai
+        }),
+        allowedMethods: AllowedMethods.ALLOW_ALL,
+        cachePolicy: CachePolicy.CACHING_OPTIMIZED,
+        cachedMethods: CachedMethods.CACHE_GET_HEAD_OPTIONS,
       },
-      errorConfigurations: [
+      certificate: this.certificate,
+      domainNames: [`${this.props.subdomain}.${this.props.domainName}`],
+      errorResponses: [
         {
-          errorCode: 404,
-          responseCode: 200,
-          responsePagePath: '/index.html',
-          errorCachingMinTtl: 300,
+          httpStatus: 404,
+          responseHttpStatus: 200,
+          responsePagePath: '/index.html'
         },
         {
-          errorCode: 403,
-          responseCode: 200,
-          responsePagePath: '/index.html',
-          errorCachingMinTtl: 300,
-        },
-      ],
+          httpStatus: 403,
+          responseHttpStatus: 200,
+          responsePagePath: '/index.html'
+        }
+      ]
     });
 
     new CnameRecord(this, 'DistributionCNameRecord', {
@@ -278,79 +269,36 @@ export class StrapiServerlessStack extends Stack {
       recordName: this.props.subdomain,
     });
 
-    this.adminDistribution = new CloudFrontWebDistribution(this, 'AdminDistribution', {
-      originConfigs: [
-        {
-          s3OriginSource: {
-            s3BucketSource: this.webBucket,
-            originHeaders: {
-              'X-Allowed-Origin-Uri': `https://${this.props.subdomain}-api.${this.props.domainName}`,
-            },
-            originAccessIdentity:this.oai,
-            originPath: '/strapi-admin'
-          },
-          behaviors: [
-            {
-              isDefaultBehavior: true,
-              lambdaFunctionAssociations: [
-                {
-                  eventType: LambdaEdgeEventType.ORIGIN_RESPONSE,
-                  lambdaFunction: originResponse
-                },
-              ]
-            }
-          ]
-        },
-      ],
-      viewerProtocolPolicy: ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-      viewerCertificate: {
-        aliases: [`${this.props.subdomain}-admin.${this.props.domainName}`],
-        props: {
-          acmCertificateArn: this.certificate.certificateArn,
-          sslSupportMethod: 'sni-only',
-        },
-      },
-      errorConfigurations: [
-        {
-          errorCode: 404,
-          responseCode: 200,
-          responsePagePath: '/index.html',
-          errorCachingMinTtl: 300,
-        },
-        {
-          errorCode: 403,
-          responseCode: 200,
-          responsePagePath: '/index.html',
-          errorCachingMinTtl: 300,
-        },
-      ],
-    });
-
-    new CnameRecord(this, 'AdminDistributionCNameRecord', {
-      zone: this.domainZone,
-      domainName: this.adminDistribution.distributionDomainName,
-      recordName: `${this.props.subdomain}-admin`,
-    });
-
-    if (!this.api.domainName) return;
-
-    this.cachedDistribution = new Distribution(this, 'CachedDistribution', {
+    this.adminDistribution = new Distribution(this, 'AdminDistribution', {
       defaultBehavior: {
-        origin: new HttpOrigin(`${this.props.subdomain}-api.${this.props.domainName}`, {
-          protocolPolicy: OriginProtocolPolicy.HTTPS_ONLY,
+        origin: new S3Origin(this.webBucket, {
+          originPath: '/strapi-admin',
+          originAccessIdentity: this.oai
         }),
         allowedMethods: AllowedMethods.ALLOW_ALL,
         cachePolicy: CachePolicy.CACHING_OPTIMIZED,
         cachedMethods: CachedMethods.CACHE_GET_HEAD_OPTIONS,
       },
       certificate: this.certificate,
-      domainNames: [`${this.props.subdomain}-cached.${this.props.domainName}`],
+      domainNames: [`${this.props.subdomain}-admin.${this.props.domainName}`],
+      errorResponses: [
+        {
+          httpStatus: 404,
+          responseHttpStatus: 200,
+          responsePagePath: '/index.html'
+        },
+        {
+          httpStatus: 403,
+          responseHttpStatus: 200,
+          responsePagePath: '/index.html'
+        }
+      ]
     });
 
-    new CnameRecord(this, 'CachedDistributionCNameRecord', {
+    new CnameRecord(this, 'AdminDistributionCNameRecord', {
       zone: this.domainZone,
-      domainName: this.cachedDistribution.distributionDomainName,
-      recordName: `${this.props.subdomain}-cached`
+      domainName: this.adminDistribution.distributionDomainName,
+      recordName: `${this.props.subdomain}-admin`,
     });
   }
 
