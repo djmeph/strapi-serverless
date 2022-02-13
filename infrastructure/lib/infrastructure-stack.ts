@@ -8,7 +8,7 @@ import { Construct } from 'constructs';
 import { InfrastructureStackProps } from './infrastructure-interface';
 import { ISecret, Secret } from 'aws-cdk-lib/aws-secretsmanager';
 import { Effect, PolicyStatement } from 'aws-cdk-lib/aws-iam';
-import { DockerImageCode, DockerImageFunction } from 'aws-cdk-lib/aws-lambda';
+import { Code, DockerImageCode, DockerImageFunction, Function, IFunction, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { LambdaRestApi } from 'aws-cdk-lib/aws-apigateway';
 import { ApiGateway } from 'aws-cdk-lib/aws-route53-targets';
 import { AllowedMethods, CachedMethods, CachePolicy, Distribution, IDistribution, OriginAccessIdentity } from 'aws-cdk-lib/aws-cloudfront';
@@ -38,6 +38,8 @@ export class StrapiServerlessStack extends Stack {
   dbCreds: ISecret;
   distribution: IDistribution;
   adminDistribution: IDistribution;
+  cachedApi: LambdaRestApi;
+  cacheBusterFunc: IFunction;
 
   constructor(scope: Construct, id: string, private props: InfrastructureStackProps) {
     super(scope, id, props);
@@ -48,6 +50,7 @@ export class StrapiServerlessStack extends Stack {
     this.createCertificate();
     this.createHostedZone();
     this.createLambdaFunction();
+    this.createCacheBusterLambda();
     this.createDistributions();
     this.deployAdminWebAssets();
   }
@@ -155,6 +158,7 @@ export class StrapiServerlessStack extends Stack {
         STRAPI_URL: `https://${this.props.subdomain}-api.${this.props.domainName}`,
         STRAPI_ADMIN_URL: `https://${this.props.subdomain}-admin.${this.props.domainName}`,
         SERVE_ADMIN: 'false',
+        CACHE_BUSTER_URL: `https://${this.props.subdomain}-cache-buster.${this.props.domainName}`
       },
       vpc: this.vpc,
       vpcSubnets: {
@@ -216,7 +220,7 @@ export class StrapiServerlessStack extends Stack {
       recordName: `${this.props.subdomain}-api`
     });
 
-    const cachedApi = new LambdaRestApi(this, 'CachedLambdaRestApi', {
+    this.cachedApi = new LambdaRestApi(this, 'CachedLambdaRestApi', {
       handler: func,
       domainName: {
         certificate: this.certificate,
@@ -238,10 +242,59 @@ export class StrapiServerlessStack extends Stack {
     });
 
     new ARecord(this, 'CachedApiDNSRecord', {
-      target: RecordTarget.fromAlias(new ApiGateway(cachedApi)),
+      target: RecordTarget.fromAlias(new ApiGateway(this.cachedApi)),
       zone: this.domainZone,
       recordName: `${this.props.subdomain}-cached`
     });
+  }
+
+  createCacheBusterLambda() {
+    this.cacheBusterFunc = new Function(this, 'CacheBusterLambda', {
+      code: Code.fromAsset(path.join(__dirname, 'lambdas/clear-cache')),
+      handler: 'index.handler',
+      runtime: Runtime.NODEJS_14_X,
+      memorySize: 256,
+      timeout: Duration.seconds(30),
+      environment: {
+        REST_API_ID: this.cachedApi.restApiId,
+        STAGE_NAME: this.cachedApi.deploymentStage.stageName
+      },
+      vpc: this.vpc,
+      vpcSubnets: {
+        subnetType: SubnetType.PRIVATE_WITH_NAT
+      }
+    });
+
+    const api = new LambdaRestApi(this, 'CacheBusterLambdaRestApi', {
+      handler: this.cacheBusterFunc,
+      proxy: false,
+    });
+    api.root.addMethod('POST');
+
+    const apiStagePolicyStatement = new PolicyStatement({
+      actions: [
+        'execute-api:InvalidateCache',
+        'apigateway:DELETE'],
+      effect: Effect.ALLOW,
+      resources: [
+        Fn.join(':', [
+          'arn:aws:execute-api',
+          Fn.ref('AWS::Region'),
+          Fn.ref('AWS::AccountId'),
+          Fn.join('/', [
+            this.cachedApi.restApiId,
+            this.cachedApi.deploymentStage.stageName,
+            'POST/*'
+          ]),
+        ]),
+        Fn.join('/', [
+          this.cachedApi.deploymentStage.stageArn,
+          'cache/data',
+        ]),
+      ],
+    });
+
+    this.cacheBusterFunc.addToRolePolicy(apiStagePolicyStatement);
   }
 
   createDistributions() {
